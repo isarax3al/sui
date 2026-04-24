@@ -29,6 +29,7 @@ use move_binary_format::{
 };
 use move_core_types::{
     account_address::AccountAddress,
+    compressed::runtime as CR,
     identifier::IdentStr,
     language_storage::{ModuleId, StructTag},
     u256::U256,
@@ -775,7 +776,7 @@ where
         vm: &MoveVM,
         linkage: &ExecutableLinkage,
         tag: StructTag,
-    ) -> Result<(Type, move_core_types::runtime_value::MoveTypeLayout), Mode::Error> {
+    ) -> Result<(Type, CR::MoveTypeLayout), Mode::Error> {
         let type_tag = TypeTag::Struct(Box::new(tag));
         let vm_type = vm
             .load_type(&type_tag)
