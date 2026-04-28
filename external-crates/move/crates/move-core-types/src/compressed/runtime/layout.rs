@@ -60,8 +60,8 @@ pub(crate) type MoveTypeLayoutPool = [MoveTypeNode];
 /// negatives. `Hash` is intentionally not implemented (no canonical form).
 #[derive(Debug, Clone)]
 pub struct MoveTypeLayout {
-    pool: Arc<MoveTypeLayoutPool>,
-    root: LayoutRef,
+    pub(crate) pool: Arc<MoveTypeLayoutPool>,
+    pub(crate) root: LayoutRef,
 }
 
 /// A resolved view of a layout node. Leaf types are unit variants;
@@ -95,6 +95,12 @@ pub struct MoveEnumLayout {
     pub(crate) variants: Arc<[VariantLayout]>,
 }
 
+impl MoveEnumLayout {
+    pub(crate) fn from_parts(variants: Arc<[VariantLayout]>) -> Self {
+        Self { variants }
+    }
+}
+
 /// The struct layout of a struct type, as a view into a shared pool.
 #[derive(Debug, Clone)]
 pub struct MoveStructLayout(pub MoveFieldsLayout);
@@ -111,8 +117,14 @@ pub enum VariantLayout {
 /// The field layout of a struct or enum variant, as a view into a shared pool.
 #[derive(Debug, Clone)]
 pub struct MoveFieldsLayout {
-    pool: Arc<MoveTypeLayoutPool>,
-    fields: Arc<[LayoutRef]>,
+    pub(crate) pool: Arc<MoveTypeLayoutPool>,
+    pub(crate) fields: Arc<[LayoutRef]>,
+}
+
+impl MoveFieldsLayout {
+    pub(crate) fn from_parts(pool: Arc<MoveTypeLayoutPool>, fields: Arc<[LayoutRef]>) -> Self {
+        Self { pool, fields }
+    }
 }
 
 // --- Builder type ---
@@ -437,7 +449,11 @@ impl MoveDatatypeLayout {
 
 impl fmt::Display for MoveStructLayout {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "struct {}", self.0)
+        if f.alternate() {
+            write!(f, "struct {:#}", self.0)
+        } else {
+            write!(f, "struct {}", self.0)
+        }
     }
 }
 

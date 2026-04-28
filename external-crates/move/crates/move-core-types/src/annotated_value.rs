@@ -8,6 +8,7 @@ use crate::{
     VARIANT_TAG_MAX_VALUE,
     account_address::AccountAddress,
     annotated_visitor::{Error as VError, ValueDriver, Visitor, visit_struct, visit_value},
+    compressed::annotated as CA,
     identifier::Identifier,
     language_storage::{StructTag, TypeTag},
     runtime_value::{self as R, MOVE_STRUCT_FIELDS, MOVE_STRUCT_TYPE},
@@ -201,21 +202,23 @@ impl MoveValue {
     ///
     /// Deserialization can fail because of an issue in the serialized format (data doesn't match
     /// layout, unexpected bytes or trailing bytes), or a custom error expressed by the visitor.
-    pub fn visit_deserialize<'b, 'l, V: Visitor<'b, 'l>>(
+    pub fn visit_deserialize<'b, V: Visitor<'b>>(
         blob: &'b [u8],
-        ty: &'l MoveTypeLayout,
+        ty: CA::MoveTypeLayout,
         visitor: &mut V,
     ) -> Result<V::Value, V::Error>
     where
         V::Error: std::error::Error + Send + Sync + 'static,
     {
         // TODO: Don't simplify error to anyhow::Error
-        let mut bytes = Cursor::new(blob);
-        let res = visit_value(&mut bytes, ty, visitor)?;
-        if bytes.position() as usize == blob.len() {
+        let root = ty.root;
+        let pool = ty.pool.clone();
+        let mut driver = ValueDriver::new(Cursor::new(blob), pool, Some(root));
+        let res = visit_value(&mut driver, root, visitor)?;
+        if driver.position() == blob.len() {
             Ok(res)
         } else {
-            let remaining = blob.len() - bytes.position() as usize;
+            let remaining = blob.len() - driver.position();
             Err(VError::TrailingBytes(remaining).into())
         }
     }
@@ -264,21 +267,21 @@ impl MoveStruct {
     /// Like `MoveValue::visit_deserialize` (see for details), but specialized to visiting a struct
     /// (the `blob` is known to be a serialized Move struct, and the layout is a
     /// `MoveStructLayout`).
-    pub fn visit_deserialize<'b, 'l, V: Visitor<'b, 'l>>(
+    pub fn visit_deserialize<'b, V: Visitor<'b>>(
         blob: &'b [u8],
-        ty: &'l MoveStructLayout,
+        ty: CA::MoveStructLayout,
         visitor: &mut V,
     ) -> Result<V::Value, V::Error>
     where
         V::Error: std::error::Error + Send + Sync + 'static,
     {
-        let mut bytes = Cursor::new(blob);
-        let driver = ValueDriver::new(&mut bytes, None);
-        let res = visit_struct(driver, ty, visitor)?;
-        if bytes.position() as usize == blob.len() {
+        let pool = ty.fields.pool.clone();
+        let mut driver = ValueDriver::new(Cursor::new(blob), pool, None);
+        let res = visit_struct(&mut driver, ty, visitor)?;
+        if driver.position() == blob.len() {
             Ok(res)
         } else {
-            let remaining = blob.len() - bytes.position() as usize;
+            let remaining = blob.len() - driver.position();
             Err(VError::TrailingBytes(remaining).into())
         }
     }
