@@ -952,7 +952,7 @@ pub fn get_all_uids(
         type Error = AV::Error;
         fn traverse_address(
             &mut self,
-            _driver: &AV::ValueDriver<'_, 'b>,
+            _driver: &AV::ValueDriver<'b>,
             value: AccountAddress,
         ) -> Result<(), Self::Error> {
             self.0.insert(value.into());

@@ -981,7 +981,7 @@ fn find_all_wrapped_objects<'a, 'i>(
 
         fn traverse_address(
             &mut self,
-            _: &AV::ValueDriver<'_, 'b>,
+            _: &AV::ValueDriver<'b>,
             address: AccountAddress,
         ) -> Result<(), Self::Error> {
             // If we're looking for addresses, and we found one, then save it.
