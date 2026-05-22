@@ -148,6 +148,8 @@ where
     Eq, PartialEq, Clone, Debug, Serialize, Deserialize, Error, Hash, AsRefStr, IntoStaticStr,
 )]
 pub enum UserInputError {
+    #[error("Transaction Expired")]
+    TransactionExpired,
     #[error("Mutable object {object_id} cannot appear more than one in one transaction")]
     MutableObjectUsedMoreThanOnce { object_id: ObjectID },
     #[error("Wrong number of parameters for the transaction")]
@@ -962,7 +964,10 @@ impl TryFrom<SuiError> for UserInputError {
 
 impl From<UserInputError> for SuiError {
     fn from(error: UserInputError) -> Self {
-        SuiErrorKind::UserInputError { error }.into()
+        match error {
+            UserInputError::TransactionExpired => SuiErrorKind::TransactionExpired.into(),
+            error => SuiErrorKind::UserInputError { error }.into(),
+        }
     }
 }
 

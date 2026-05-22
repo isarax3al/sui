@@ -2413,7 +2413,7 @@ impl AuthorityState {
         }
 
         // Cheap validity checks for a transaction, including input size limits.
-        transaction.validity_check_no_gas_check(epoch_store.protocol_config())?;
+        transaction.validity_check_no_gas_check(&epoch_store.tx_validity_check_context())?;
 
         let input_object_kinds = transaction.input_objects()?;
         let receiving_object_refs = transaction.receiving_objects();

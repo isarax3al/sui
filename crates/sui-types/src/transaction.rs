@@ -2916,7 +2916,7 @@ pub trait TransactionDataAPI {
 
     fn validity_check(&self, context: &TxValidityCheckContext<'_>) -> SuiResult;
 
-    fn validity_check_no_gas_check(&self, config: &ProtocolConfig) -> UserInputResult;
+    fn validity_check_no_gas_check(&self, context: &TxValidityCheckContext<'_>) -> UserInputResult;
 
     /// Check if the transaction is compliant with sponsorship.
     fn check_sponsorship(&self) -> UserInputResult;
@@ -3139,14 +3139,20 @@ impl TransactionDataAPI for TransactionDataV1 {
     }
 
     fn validity_check(&self, context: &TxValidityCheckContext<'_>) -> SuiResult {
+        self.validity_check_no_gas_check(context)?;
+        Ok(())
+    }
+
+    fn validity_check_no_gas_check(&self, context: &TxValidityCheckContext<'_>) -> UserInputResult {
         let config = context.config;
+        self.kind().validity_check(config)?;
 
         // Checks to see if the transaction has expired
         match self.expiration() {
             TransactionExpiration::None => (), // always valid
             TransactionExpiration::Epoch(max_epoch) => {
                 if context.epoch > *max_epoch {
-                    return Err(SuiErrorKind::TransactionExpired.into());
+                    return Err(UserInputError::TransactionExpired);
                 }
             }
             TransactionExpiration::ValidDuring {
@@ -3160,14 +3166,9 @@ impl TransactionDataAPI for TransactionDataV1 {
                 if min_timestamp.is_some() || max_timestamp.is_some() {
                     return Err(UserInputError::Unsupported(
                         "Timestamp-based transaction expiration is not yet supported".to_string(),
-                    )
-                    .into());
+                    ));
                 }
 
-                // Legacy behavior: If ValidDuring is present, it must have either one- or two-epoch
-                // validity, even if the transaction is has other replay-protection.
-                // New behavior: ValidDuring can specify any epoch range. Replay protection is enforced
-                // by sui_transaction_checks::check_replay_protection.
                 match (min_epoch, max_epoch) {
                     _ if config.relax_valid_during_for_owned_inputs() => (),
                     (Some(min), Some(max)) => {
@@ -3175,21 +3176,18 @@ impl TransactionDataAPI for TransactionDataV1 {
                             if !(*max == *min || *max == min.saturating_add(1)) {
                                 return Err(UserInputError::Unsupported(
                                     "max_epoch must be at most min_epoch + 1".to_string(),
-                                )
-                                .into());
+                                ));
                             }
                         } else if min != max {
                             return Err(UserInputError::Unsupported(
                                 "min_epoch must equal max_epoch".to_string(),
-                            )
-                            .into());
+                            ));
                         }
                     }
                     _ => {
                         return Err(UserInputError::Unsupported(
                             "Both min_epoch and max_epoch must be specified".to_string(),
-                        )
-                        .into());
+                        ));
                     }
                 }
 
@@ -3197,19 +3195,18 @@ impl TransactionDataAPI for TransactionDataV1 {
                     return Err(UserInputError::InvalidChainId {
                         provided: format!("{:?}", chain),
                         expected: format!("{:?}", context.chain_identifier),
-                    }
-                    .into());
+                    });
                 }
 
                 if let Some(min) = min_epoch
                     && context.epoch < *min
                 {
-                    return Err(SuiErrorKind::TransactionExpired.into());
+                    return Err(UserInputError::TransactionExpired);
                 }
                 if let Some(max) = max_epoch
                     && context.epoch > *max
                 {
-                    return Err(SuiErrorKind::TransactionExpired.into());
+                    return Err(UserInputError::TransactionExpired);
                 }
             }
         }
@@ -3219,13 +3216,12 @@ impl TransactionDataAPI for TransactionDataV1 {
             // inputs
             fp_ensure!(
                 !self.gas().is_empty() || config.enable_address_balance_gas_payments(),
-                UserInputError::MissingGasPayment.into()
+                UserInputError::MissingGasPayment
             );
 
             fp_ensure!(
                 config.enable_accumulators(),
                 UserInputError::Unsupported("Address balance withdraw is not enabled".to_string())
-                    .into()
             );
 
             // TODO(address-balances): Use a protocol config parameter for max_withdraws.
@@ -3239,8 +3235,7 @@ impl TransactionDataAPI for TransactionDataV1 {
                     WithdrawFrom::Sponsor => {
                         return Err(UserInputError::InvalidWithdrawReservation {
                             error: "Explicit sponsor withdrawals are not yet supported".to_string(),
-                        }
-                        .into());
+                        });
                     }
                 }
 
@@ -3252,7 +3247,6 @@ impl TransactionDataAPI for TransactionDataV1 {
                                 error: "Balance withdraw reservation amount must be non-zero"
                                     .to_string(),
                             }
-                            .into()
                         );
                     }
                 };
@@ -3264,13 +3258,12 @@ impl TransactionDataAPI for TransactionDataV1 {
                 // specify a TransactionDuring are.
                 // TODO: this check can be skipped if the transaction contains any address owned inputs.
                 if parsed.epoch_id() != context.epoch && parsed.epoch_id() + 1 != context.epoch {
-                    return Err(SuiErrorKind::TransactionExpired.into());
+                    return Err(UserInputError::TransactionExpired);
                 }
                 if parsed.reservation_amount() == 0 {
                     return Err(UserInputError::InvalidWithdrawReservation {
                         error: "Balance withdraw reservation amount must be non-zero".to_string(),
-                    }
-                    .into());
+                    });
                 }
             }
 
@@ -3288,7 +3281,6 @@ impl TransactionDataAPI for TransactionDataV1 {
                         "Maximum number of balance withdraw reservations is {max_withdraws}"
                     ),
                 }
-                .into()
             );
         }
 
@@ -3305,7 +3297,6 @@ impl TransactionDataAPI for TransactionDataV1 {
                         "Argument::GasCoin is not supported with address balance gas payments"
                             .to_string(),
                     )
-                    .into()
                 );
             }
 
@@ -3317,7 +3308,6 @@ impl TransactionDataAPI for TransactionDataV1 {
                         gas_price: self.gas_data.price,
                         reference_gas_price: context.reference_gas_price,
                     }
-                    .into()
                 );
             }
 
@@ -3329,42 +3319,75 @@ impl TransactionDataAPI for TransactionDataV1 {
                 if matches!(self.expiration(), TransactionExpiration::None) {
                     // To avoid changing error behavior unnecessarily, we flag this as a missing gas payment error
                     // instead of a missing expiration error.
-                    return Err(UserInputError::MissingGasPayment.into());
+                    return Err(UserInputError::MissingGasPayment);
                 }
 
                 if !self.expiration().is_replay_protected() {
                     return Err(UserInputError::InvalidExpiration {
                         error: "Address balance gas payments require ValidDuring expiration"
                             .to_string(),
-                    }
-                    .into());
+                    });
                 }
             }
         } else {
-            fp_ensure!(
-                !self.gas().is_empty(),
-                UserInputError::MissingGasPayment.into()
-            );
+            fp_ensure!(!self.gas().is_empty(), UserInputError::MissingGasPayment);
         }
 
+        if !self.is_system_tx() {
+            fp_ensure!(
+                !check_for_gas_price_too_high(config.gas_model_version())
+                    || self.gas_data.price < config.max_gas_price(),
+                UserInputError::GasPriceTooHigh {
+                    max_gas_price: config.max_gas_price(),
+                }
+            );
+            let cost_table = SuiCostTable::new(config, self.gas_data.price);
+
+            fp_ensure!(
+                self.gas_data.budget <= cost_table.max_gas_budget,
+                UserInputError::GasBudgetTooHigh {
+                    gas_budget: self.gas_data().budget,
+                    max_budget: cost_table.max_gas_budget,
+                }
+            );
+            let is_gasless = config.enable_gasless() && self.is_gasless_transaction();
+            if is_gasless {
+                fp_ensure!(
+                    self.gas_data.budget == 0,
+                    UserInputError::Unsupported(
+                        "gas_budget must be 0 for gasless transactions".to_string()
+                    )
+                );
+            } else {
+                fp_ensure!(
+                    self.gas_data.budget >= cost_table.min_transaction_cost,
+                    UserInputError::GasBudgetTooLow {
+                        gas_budget: self.gas_data.budget,
+                        min_budget: cost_table.min_transaction_cost,
+                    }
+                );
+            }
+        }
+
+        // Enforce the gas payment object count limit on all paths including dry-run.
         let gas_len = self.gas().len();
         let max_gas_objects = config.max_gas_payment_objects() as usize;
-
         let within_limit = if config.correct_gas_payment_limit_check() {
             gas_len <= max_gas_objects
         } else {
             gas_len < max_gas_objects
         };
-
         fp_ensure!(
             within_limit,
             UserInputError::SizeLimitExceeded {
                 limit: "maximum number of gas payment objects".to_string(),
                 value: config.max_gas_payment_objects().to_string()
             }
-            .into()
         );
 
+        // Gas coin reservations must be for SUI and owned by the sender.
+        // This mirrors the check previously only in validity_check(context) so that
+        // it also fires on the dry-run / simulate path.
         if !config.enable_coin_reservation_obj_refs() {
             for (_, _, gas_digest) in self.gas() {
                 fp_ensure!(
@@ -3376,18 +3399,17 @@ impl TransactionDataAPI for TransactionDataV1 {
                 );
             }
         } else {
-            // When coin reservations are enabled, validate that gas coin reservations are for SUI,
-            // and that they are owned by the sender. (Sponsorship via coin reservations is not supported.)
             let sui_accumulator_id =
-                *AccumulatorValue::get_field_id(self.sender, &Balance::type_tag(GAS::type_tag()))?
+                *AccumulatorValue::get_field_id(self.sender, &Balance::type_tag(GAS::type_tag()))
+                    .map_err(|e| UserInputError::InvalidWithdrawReservation {
+                        error: e.to_string(),
+                    })?
                     .inner();
 
             for gas_ref in self.gas() {
                 if let Some(parsed) =
                     ParsedObjectRefWithdrawal::parse(gas_ref, context.chain_identifier)
                 {
-                    // Coin reservations draw from the sender's address balance, so they cannot
-                    // be used in sponsored transactions where gas is paid by someone else.
                     fp_ensure!(
                         self.gas_owner() == self.sender,
                         UserInputError::GasObjectNotOwnedObject {
@@ -3405,55 +3427,6 @@ impl TransactionDataAPI for TransactionDataV1 {
                 }
             }
         }
-
-        if !self.is_system_tx() {
-            fp_ensure!(
-                !check_for_gas_price_too_high(config.gas_model_version())
-                    || self.gas_data.price < config.max_gas_price(),
-                UserInputError::GasPriceTooHigh {
-                    max_gas_price: config.max_gas_price(),
-                }
-                .into()
-            );
-            let cost_table = SuiCostTable::new(config, self.gas_data.price);
-
-            fp_ensure!(
-                self.gas_data.budget <= cost_table.max_gas_budget,
-                UserInputError::GasBudgetTooHigh {
-                    gas_budget: self.gas_data().budget,
-                    max_budget: cost_table.max_gas_budget,
-                }
-                .into()
-            );
-            let is_gasless = config.enable_gasless() && self.is_gasless_transaction();
-            if is_gasless {
-                fp_ensure!(
-                    self.gas_data.budget == 0,
-                    UserInputError::Unsupported(
-                        "gas_budget must be 0 for gasless transactions".to_string()
-                    )
-                    .into()
-                );
-            } else {
-                fp_ensure!(
-                    self.gas_data.budget >= cost_table.min_transaction_cost,
-                    UserInputError::GasBudgetTooLow {
-                        gas_budget: self.gas_data.budget,
-                        min_budget: cost_table.min_transaction_cost,
-                    }
-                    .into()
-                );
-            }
-        }
-
-        self.validity_check_no_gas_check(config)?;
-        Ok(())
-    }
-
-    // Keep all the logic for validity here, we need this for dry run where the gas
-    // may not be provided and created "on the fly"
-    fn validity_check_no_gas_check(&self, config: &ProtocolConfig) -> UserInputResult {
-        self.kind().validity_check(config)?;
 
         if config.enable_gasless() && self.is_gasless_transaction() {
             let TransactionKind::ProgrammableTransaction(pt) = &self.kind else {
