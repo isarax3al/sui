@@ -16,6 +16,7 @@ pub struct ProxyConfig {
     pub remote_write: RemoteWriteConfig,
     pub dynamic_peers: DynamicPeerValidationConfig,
     pub static_peers: Option<StaticPeerValidationConfig>,
+    pub hashi_nodes: Option<HashiNodeValidationConfig>,
     pub metrics_address: String,
     pub histogram_address: String,
 }
@@ -81,6 +82,25 @@ pub struct StaticPubKey {
     pub name: String,
     /// the peer_id from a node config file (Ed25519 PublicKey)
     pub peer_id: String,
+}
+
+/// HashiNodeValidationConfig drives discovery of hashi committee members from the
+/// on-chain `hashi::hashi::Hashi` shared object. Members are derived from the active
+/// committee (and pending committee during reconfig) of `CommitteeSet`; each member's
+/// `tls_public_key` is fetched live from the `members` Bag so hot-rotations are
+/// picked up within one poll interval.
+///
+/// The Sui JSON-RPC URL is reused from `dynamic_peers.url` (hashi runs on the same
+/// chain as the Sui validators we already discover dynamically).
+#[serde_as]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct HashiNodeValidationConfig {
+    /// Object ID of the `hashi::hashi::Hashi` shared object on this network.
+    pub hashi_object_id: String,
+    /// How often to refresh the allowlist from chain.
+    #[serde_as(as = "DurationSeconds<u64>")]
+    pub interval: Duration,
 }
 
 /// the default idle worker per host (reqwest to remote write url call)

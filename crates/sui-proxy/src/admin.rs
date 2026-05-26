@@ -1,6 +1,9 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
-use crate::config::{DynamicPeerValidationConfig, RemoteWriteConfig, StaticPeerValidationConfig};
+use crate::config::{
+    DynamicPeerValidationConfig, HashiNodeValidationConfig, RemoteWriteConfig,
+    StaticPeerValidationConfig,
+};
 use crate::handlers::publish_metrics;
 use crate::histogram_relay::HistogramRelay;
 use crate::middleware::{
@@ -242,6 +245,7 @@ pub fn create_server_cert_default_allow(
 pub fn create_server_cert_enforce_peer(
     dynamic_peers: DynamicPeerValidationConfig,
     static_peers: Option<StaticPeerValidationConfig>,
+    hashi_nodes: Option<HashiNodeValidationConfig>,
 ) -> Result<(ServerConfig, Option<SuiNodeProvider>), sui_tls::rustls::Error> {
     let (Some(certificate_path), Some(private_key_path)) =
         (dynamic_peers.certificate_file, dynamic_peers.private_key)
@@ -253,7 +257,12 @@ pub fn create_server_cert_enforce_peer(
     let static_peers = load_static_peers(static_peers).map_err(|e| {
         sui_tls::rustls::Error::General(format!("unable to load static pub keys: {}", e))
     })?;
-    let allower = SuiNodeProvider::new(dynamic_peers.url, dynamic_peers.interval, static_peers);
+    let allower = SuiNodeProvider::new(
+        dynamic_peers.url,
+        dynamic_peers.interval,
+        static_peers,
+        hashi_nodes,
+    );
     allower.poll_peer_list();
     let c = ClientCertVerifier::new(allower.clone(), SUI_VALIDATOR_SERVER_NAME.to_string())
         .rustls_server_config(

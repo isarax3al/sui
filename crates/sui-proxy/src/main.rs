@@ -67,8 +67,12 @@ async fn main() -> Result<()> {
                 None,
             )
         } else {
-            create_server_cert_enforce_peer(config.dynamic_peers, config.static_peers)
-                .expect("unable to create tls server config")
+            create_server_cert_enforce_peer(
+                config.dynamic_peers,
+                config.static_peers,
+                config.hashi_nodes,
+            )
+            .expect("unable to create tls server config")
         };
     let histogram_listener = std::net::TcpListener::bind(config.histogram_address).unwrap();
     let metrics_listener = std::net::TcpListener::bind(config.metrics_address).unwrap();
