@@ -65,7 +65,7 @@ pub(crate) struct TransactionContents {
     pub(crate) contents: Option<Arc<NativeTransactionContents>>,
 }
 
-pub(crate) type CTransaction = JsonCursor<u64>;
+pub type CTransaction = JsonCursor<u64>;
 
 /// Description of a transaction, the unit of activity on Sui.
 #[Object]

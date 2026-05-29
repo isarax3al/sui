@@ -79,6 +79,11 @@ const GRAPHQL_SUBSCRIPTIONS_PATH: &str = "/graphql/subscriptions";
 const HEALTH_PATH: &str = "/graphql/health";
 
 mod api;
+pub use api::scalars::cursor::JsonCursor;
+pub use api::types::checkpoint::CCheckpoint;
+pub use api::types::event::CEvent;
+pub use api::types::event::EventCursor;
+pub use api::types::transaction::CTransaction;
 pub mod args;
 pub mod config;
 mod error;
