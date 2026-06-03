@@ -4167,21 +4167,3 @@ async fn poc_double_withdrawal_across_epoch_boundary() {
         }
     }
 }
-
-#[tokio::test]
-async fn poc_double_withdrawal_cluster() {
-    use test_cluster::TestClusterBuilder;
-    
-    let cluster = TestClusterBuilder::new()
-        .with_epoch_duration_ms(5000)
-        .build()
-        .await;
-    
-    println!("Cluster started, epoch: {:?}", cluster.get_epoch().await);
-    println!("Test infrastructure works");
-    
-    // نؤكد الـ cluster يعمل أولاً
-    let epoch = cluster.get_epoch().await;
-    assert!(epoch >= 0);
-    println!("SUCCESS: cluster working at epoch {}", epoch);
-}
