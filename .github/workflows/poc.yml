@@ -96,4 +96,4 @@ jobs:
       - run: sudo apt-get update -qq && sudo apt-get install -y clang pkg-config libssl-dev cmake jq
       - name: Run E2E simtest
         run: |
-          SUI_SKIP_SIMTESTS=1 cargo test -p sui-e2e-tests --test poc_epoch_boundary -- --nocapture 2>&1 | tail -50
+          SUI_SKIP_SIMTESTS=1 cargo test -p sui-e2e-tests --test poc_epoch_boundary -- --nocapture 2>&1 | head -80
