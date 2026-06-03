@@ -15,18 +15,15 @@ use sui_core::accumulators::balances::get_all_balances_for_owner;
 use sui_keys::keystore::AccountKeystore;
 use sui_macros::*;
 use sui_protocol_config::{ProtocolConfig, ProtocolVersion};
-use sui_simulator::has_mainnet_protocol_config_override;
 use sui_test_transaction_builder::FundSource;
 use sui_types::{
     SUI_ACCUMULATOR_ROOT_OBJECT_ID, SUI_CLOCK_OBJECT_ID, SUI_CLOCK_OBJECT_SHARED_VERSION,
     SUI_FRAMEWORK_PACKAGE_ID, TypeTag,
     accumulator_root::AccumulatorValue,
     balance::Balance,
-    base_types::{ObjectID, ObjectRef, SequenceNumber, SuiAddress, dbg_addr},
-    coin_reservation::{CoinReservationResolverTrait, ParsedObjectRefWithdrawal},
+    base_types::{ObjectID, ObjectRef, SuiAddress, dbg_addr},
     digests::{ChainIdentifier, CheckpointDigest},
     effects::{InputConsensusObject, TransactionEffectsAPI},
-    error::UserInputResult,
     gas::GasCostSummary,
     gas_coin::GAS,
     object::Owner,
@@ -35,26 +32,13 @@ use sui_types::{
     transaction::{
         Argument, CallArg, Command, FundsWithdrawalArg, GasData, ObjectArg, SharedObjectMutability,
         Transaction, TransactionData, TransactionDataAPI, TransactionDataV1, TransactionExpiration,
-        TransactionKind, VerifiedTransaction, WithdrawalTypeArg,
+        TransactionKind, VerifiedTransaction,
     },
 };
 use test_cluster::{
     TestClusterBuilder,
     addr_balance_test_env::{TestEnv, TestEnvBuilder},
 };
-
-struct NoOpResolver;
-
-impl CoinReservationResolverTrait for NoOpResolver {
-    fn resolve_funds_withdrawal(
-        &self,
-        _sender: SuiAddress,
-        _coin_reservation: ParsedObjectRefWithdrawal,
-        _accumulator_version: Option<SequenceNumber>,
-    ) -> UserInputResult<FundsWithdrawalArg> {
-        panic!("Not used in these tests")
-    }
-}
 
 fn create_transaction_with_expiration(
     sender: SuiAddress,
@@ -294,7 +278,14 @@ async fn test_accumulators_disabled() {
 
 #[sim_test]
 async fn test_deposits() {
-    let mut test_env = TestEnvBuilder::new().build().await;
+    let mut test_env = TestEnvBuilder::new()
+        .with_proto_override_cb(Box::new(|_, mut cfg| {
+            cfg.create_root_accumulator_object_for_testing();
+            cfg.enable_accumulators_for_testing();
+            cfg
+        }))
+        .build()
+        .await;
 
     let (sender, gas) = test_env.get_sender_and_gas(0);
     let recipient = SuiAddress::random_for_testing_only();
@@ -348,6 +339,7 @@ async fn test_deposits() {
 async fn test_multiple_settlement_txns() {
     let mut test_env = TestEnvBuilder::new()
         .with_proto_override_cb(Box::new(|_, mut cfg| {
+            cfg.enable_accumulators_for_testing();
             cfg.set_max_updates_per_settlement_txn_for_testing(3);
             cfg
         }))
@@ -387,7 +379,14 @@ async fn test_multiple_settlement_txns() {
 
 #[sim_test]
 async fn test_deposit_and_withdraw() {
-    let mut test_env = TestEnvBuilder::new().build().await;
+    let mut test_env = TestEnvBuilder::new()
+        .with_proto_override_cb(Box::new(|_, mut cfg| {
+            cfg.create_root_accumulator_object_for_testing();
+            cfg.enable_accumulators_for_testing();
+            cfg
+        }))
+        .build()
+        .await;
 
     let sender = test_env.get_sender(0);
 
@@ -410,7 +409,14 @@ async fn test_deposit_and_withdraw() {
 
 #[sim_test]
 async fn test_deposit_and_withdraw_with_larger_reservation() {
-    let mut test_env = TestEnvBuilder::new().build().await;
+    let mut test_env = TestEnvBuilder::new()
+        .with_proto_override_cb(Box::new(|_, mut cfg| {
+            cfg.create_root_accumulator_object_for_testing();
+            cfg.enable_accumulators_for_testing();
+            cfg
+        }))
+        .build()
+        .await;
 
     let sender = test_env.get_sender(0);
 
@@ -436,7 +442,14 @@ async fn test_deposit_and_withdraw_with_larger_reservation() {
 
 #[sim_test]
 async fn test_withdraw_non_existent_balance() {
-    let mut test_env = TestEnvBuilder::new().build().await;
+    let mut test_env = TestEnvBuilder::new()
+        .with_proto_override_cb(Box::new(|_, mut cfg| {
+            cfg.create_root_accumulator_object_for_testing();
+            cfg.enable_accumulators_for_testing();
+            cfg
+        }))
+        .build()
+        .await;
 
     let sender = test_env.get_sender(0);
 
@@ -455,7 +468,14 @@ async fn test_withdraw_non_existent_balance() {
 
 #[sim_test]
 async fn test_withdraw_insufficient_balance() {
-    let mut test_env = TestEnvBuilder::new().build().await;
+    let mut test_env = TestEnvBuilder::new()
+        .with_proto_override_cb(Box::new(|_, mut cfg| {
+            cfg.create_root_accumulator_object_for_testing();
+            cfg.enable_accumulators_for_testing();
+            cfg
+        }))
+        .build()
+        .await;
 
     let (sender, gas) = test_env.get_sender_and_all_gas(0);
     let gas1 = gas[0];
@@ -520,23 +540,17 @@ async fn test_withdraw_insufficient_balance() {
 
 #[sim_test]
 async fn test_address_balance_gas() {
-    if has_mainnet_protocol_config_override() {
-        return;
-    }
     let mut test_env = TestEnvBuilder::new()
         .with_proto_override_cb(Box::new(|_, mut cfg| {
-            cfg.disable_gasless_for_testing();
+            cfg.enable_address_balance_gas_payments_for_testing();
             cfg
         }))
         .build()
         .await;
 
-    let funding_amount = 100_000_000;
+    let (sender, gas_package_id) = setup_address_balance_account(&mut test_env, 10_000_000).await;
 
-    let (sender, gas_package_id) =
-        setup_address_balance_account(&mut test_env, funding_amount).await;
-
-    test_env.verify_accumulator_exists(sender, funding_amount);
+    test_env.verify_accumulator_exists(sender, 10_000_000);
     // Verify the accumulator object count after settlement.
     test_env.verify_accumulator_object_count(1);
 
@@ -592,89 +606,22 @@ async fn test_address_balance_gas() {
         gas_used
     );
 
-    let expected_balance = funding_amount - gas_used;
+    let expected_balance = 10_000_000 - gas_used;
 
     test_env.verify_accumulator_exists(sender, expected_balance);
-
-    // Test tx with no input objects.
-    let tx = test_env
-        .tx_builder_with_gas_objects(sender, vec![])
-        .with_address_balance_gas(test_env.chain_id, 0, 0)
-        .with_gas_budget(10_000_000)
-        .build();
-
-    let (_, effects) = test_env.exec_tx_directly(tx).await.unwrap();
-    assert!(effects.status().is_ok());
-
-    test_env.cluster.trigger_reconfiguration().await;
-}
-
-#[sim_test]
-async fn test_address_balance_gas_v3_accumulator_sign() {
-    let mut test_env = TestEnvBuilder::new()
-        .with_proto_override_cb(Box::new(|_, mut cfg| {
-            cfg.set_execution_version_for_testing(3);
-            // set up config values that would otherwise be incompatible with the execution version
-            cfg.set_gas_model_version_for_testing(11);
-            cfg
-        }))
-        .build()
-        .await;
-
-    let (sender, gas_package_id) = setup_address_balance_account(&mut test_env, 10_000_000).await;
-
-    let tx = create_storage_test_transaction_address_balance(
-        sender,
-        gas_package_id,
-        test_env.rgp,
-        test_env.chain_id,
-        None,
-        0,
-    );
-
-    let signed_tx = test_env.cluster.sign_transaction(&tx).await;
-    let (effects, _) = test_env
-        .cluster
-        .execute_transaction_return_raw_effects(signed_tx)
-        .await
-        .expect("Transaction should succeed");
-
-    assert!(effects.status().is_ok());
-
-    let gas_summary = effects.gas_cost_summary();
-    let net_gas = gas_summary.net_gas_usage();
-    assert!(net_gas > 0, "Expected positive net gas usage");
-
-    let acc_events = effects.accumulator_events();
-    assert_eq!(
-        acc_events.len(),
-        1,
-        "Expected exactly one accumulator event"
-    );
-
-    match &acc_events[0].write.operation {
-        sui_types::effects::AccumulatorOperation::Split => {}
-        sui_types::effects::AccumulatorOperation::Merge => {
-            panic!("Gas charge produced Merge (deposit) instead of Split (withdrawal).");
-        }
-    }
-
-    match &acc_events[0].write.value {
-        sui_types::effects::AccumulatorValue::Integer(value) => {
-            assert_eq!(
-                *value, net_gas as u64,
-                "Accumulator event value should match net gas usage"
-            );
-        }
-        _ => panic!("Expected Integer accumulator value"),
-    }
 
     test_env.cluster.trigger_reconfiguration().await;
 }
 
 #[sim_test]
 async fn test_sponsored_address_balance_storage_rebates() {
-    let mut test_env = TestEnvBuilder::new().build().await;
+    let mut test_env = TestEnvBuilder::new()
+        .with_proto_override_cb(Box::new(|_, mut cfg| {
+            cfg.enable_address_balance_gas_payments_for_testing();
+            cfg
+        }))
+        .build()
+        .await;
 
     let gas_test_package_id = test_env.setup_test_package(move_test_code_path()).await;
 
@@ -744,8 +691,8 @@ async fn test_sponsored_address_balance_storage_rebates() {
         gas_used
     );
 
-    let sponsor_actual = test_env.get_sui_balance_ab(sponsor);
-    let sender_actual = test_env.get_sui_balance_ab(sender);
+    let sponsor_actual = test_env.get_sui_balance(sponsor);
+    let sender_actual = test_env.get_sui_balance(sender);
 
     assert!(
         sponsor_actual < 100_000_000,
@@ -812,8 +759,8 @@ async fn test_sponsored_address_balance_storage_rebates() {
         delete_gas_summary.storage_rebate
     );
 
-    let sponsor_final = test_env.get_sui_balance_ab(sponsor);
-    let sender_final = test_env.get_sui_balance_ab(sender);
+    let sponsor_final = test_env.get_sui_balance(sponsor);
+    let sender_final = test_env.get_sui_balance(sender);
 
     assert_eq!(
         sender_final, 100_000_000,
@@ -1448,7 +1395,13 @@ async fn test_transaction_expiration_edge_cases() {
 
 #[sim_test]
 async fn test_address_balance_gas_cost_parity() {
-    let mut test_env = TestEnvBuilder::new().build().await;
+    let mut test_env = TestEnvBuilder::new()
+        .with_proto_override_cb(Box::new(|_, mut cfg| {
+            cfg.enable_address_balance_gas_payments_for_testing();
+            cfg
+        }))
+        .build()
+        .await;
     let (sender, gas_test_package_id) =
         setup_address_balance_account(&mut test_env, 100_000_000).await;
 
@@ -1576,7 +1529,13 @@ async fn test_address_balance_gas_cost_parity() {
 
 #[sim_test]
 async fn test_address_balance_gas_charged_on_move_abort() {
-    let mut test_env = TestEnvBuilder::new().build().await;
+    let mut test_env = TestEnvBuilder::new()
+        .with_proto_override_cb(Box::new(|_, mut cfg| {
+            cfg.enable_address_balance_gas_payments_for_testing();
+            cfg
+        }))
+        .build()
+        .await;
 
     let (sender, gas_test_package_id) =
         setup_address_balance_account(&mut test_env, 10_000_000).await;
@@ -1624,6 +1583,10 @@ async fn test_address_balance_gas_charged_on_move_abort() {
 #[sim_test]
 async fn test_explicit_sponsor_withdrawal_banned() {
     let mut test_env = TestEnvBuilder::new()
+        .with_proto_override_cb(Box::new(|_, mut cfg| {
+            cfg.enable_address_balance_gas_payments_for_testing();
+            cfg
+        }))
         .with_test_cluster_builder_cb(Box::new(|builder| {
             builder
                 .with_protocol_version(ProtocolConfig::get_for_max_version_UNSAFE().version)
@@ -1671,7 +1634,13 @@ async fn test_explicit_sponsor_withdrawal_banned() {
 
 #[sim_test]
 async fn test_sponsor_insufficient_balance_charges_zero_gas() {
-    let mut test_env = TestEnvBuilder::new().build().await;
+    let mut test_env = TestEnvBuilder::new()
+        .with_proto_override_cb(Box::new(|_, mut cfg| {
+            cfg.enable_address_balance_gas_payments_for_testing();
+            cfg
+        }))
+        .build()
+        .await;
 
     let gas_test_package_id = test_env.setup_test_package(move_test_code_path()).await;
 
@@ -1808,7 +1777,7 @@ async fn test_sponsor_insufficient_balance_charges_zero_gas() {
 
     let successful_tx_gas = succeeded_gas;
 
-    let final_sponsor_balance = test_env.get_sui_balance_ab(sponsor);
+    let final_sponsor_balance = test_env.get_sui_balance(sponsor);
 
     let expected_final_sponsor_balance = sponsor_initial_balance - successful_tx_gas;
     assert_eq!(
@@ -1816,7 +1785,7 @@ async fn test_sponsor_insufficient_balance_charges_zero_gas() {
         "Sponsor balance should reflect only the successful transaction"
     );
 
-    let final_sender_balance = test_env.get_sui_balance_ab(sender);
+    let final_sender_balance = test_env.get_sui_balance(sender);
 
     assert_eq!(
         final_sender_balance, 100_000_000,
@@ -1828,7 +1797,13 @@ async fn test_sponsor_insufficient_balance_charges_zero_gas() {
 
 #[sim_test]
 async fn test_insufficient_balance_charges_zero_gas() {
-    let mut test_env = TestEnvBuilder::new().build().await;
+    let mut test_env = TestEnvBuilder::new()
+        .with_proto_override_cb(Box::new(|_, mut cfg| {
+            cfg.enable_address_balance_gas_payments_for_testing();
+            cfg
+        }))
+        .build()
+        .await;
 
     let (sender, gas_for_deposit) = test_env.get_sender_and_gas(0);
 
@@ -1920,7 +1895,7 @@ async fn test_insufficient_balance_charges_zero_gas() {
         .wait_for_tx_settlement(&[tx1_digest, tx2_digest])
         .await;
 
-    let final_sender_balance = test_env.get_sui_balance_ab(sender);
+    let final_sender_balance = test_env.get_sui_balance(sender);
 
     let expected_final_balance = initial_balance - withdraw_amount - successful_tx_gas;
     assert_eq!(
@@ -1933,7 +1908,13 @@ async fn test_insufficient_balance_charges_zero_gas() {
 
 #[sim_test]
 async fn test_soft_bundle_different_gas_payers() {
-    let mut test_env = TestEnvBuilder::new().build().await;
+    let mut test_env = TestEnvBuilder::new()
+        .with_proto_override_cb(Box::new(|_, mut cfg| {
+            cfg.enable_address_balance_gas_payments_for_testing();
+            cfg
+        }))
+        .build()
+        .await;
 
     let gas_test_package_id = test_env.setup_test_package(move_test_code_path()).await;
 
@@ -2011,8 +1992,8 @@ async fn test_soft_bundle_different_gas_payers() {
         .wait_for_tx_settlement(&[tx1_digest, tx2_digest])
         .await;
 
-    let actual_balance1 = test_env.get_sui_balance_ab(sender1);
-    let actual_balance2 = test_env.get_sui_balance_ab(sender2);
+    let actual_balance1 = test_env.get_sui_balance(sender1);
+    let actual_balance2 = test_env.get_sui_balance(sender2);
 
     assert_eq!(
         actual_balance1, expected_balance1,
@@ -2159,7 +2140,13 @@ async fn test_multiple_deposits_merged_in_effects() {
 
 #[sim_test]
 async fn test_address_balance_gas_budget_enforcement_with_storage() {
-    let mut test_env = TestEnvBuilder::new().build().await;
+    let mut test_env = TestEnvBuilder::new()
+        .with_proto_override_cb(Box::new(|_, mut cfg| {
+            cfg.enable_address_balance_gas_payments_for_testing();
+            cfg
+        }))
+        .build()
+        .await;
 
     let (sender, gas_package_id) = setup_address_balance_account(&mut test_env, 100_000_000).await;
 
@@ -2264,7 +2251,13 @@ async fn test_address_balance_gas_budget_enforcement_with_storage() {
 
 #[sim_test]
 async fn test_address_balance_computation_oog() {
-    let mut test_env = TestEnvBuilder::new().build().await;
+    let mut test_env = TestEnvBuilder::new()
+        .with_proto_override_cb(Box::new(|_, mut cfg| {
+            cfg.enable_address_balance_gas_payments_for_testing();
+            cfg
+        }))
+        .build()
+        .await;
 
     let (sender, gas_package_id) = setup_address_balance_account(&mut test_env, 100_000_000).await;
 
@@ -2324,7 +2317,13 @@ async fn test_address_balance_computation_oog() {
 
 #[sim_test]
 async fn test_address_balance_large_rebate() {
-    let mut test_env = TestEnvBuilder::new().build().await;
+    let mut test_env = TestEnvBuilder::new()
+        .with_proto_override_cb(Box::new(|_, mut cfg| {
+            cfg.enable_address_balance_gas_payments_for_testing();
+            cfg
+        }))
+        .build()
+        .await;
 
     let (sender, gas_package_id) = setup_address_balance_account(&mut test_env, 100_000_000).await;
 
@@ -2359,15 +2358,11 @@ async fn test_address_balance_large_rebate() {
     let created_object_ref = effects
         .created()
         .iter()
-        .find(|(obj_ref, _)| {
-            effects
-                .gas_object()
-                .is_none_or(|(gas_ref, _)| obj_ref.0 != gas_ref.0)
-        })
+        .find(|(obj_ref, _)| obj_ref.0 != effects.gas_object().0.0)
         .map(|(obj_ref, _)| *obj_ref)
         .expect("Should have created an object");
 
-    let initial_balance = test_env.get_sui_balance_ab(sender);
+    let initial_balance = test_env.get_sui_balance(sender);
 
     let mut builder = ProgrammableTransactionBuilder::new();
     let object_arg = builder
@@ -2416,7 +2411,7 @@ async fn test_address_balance_large_rebate() {
         net_gas
     );
 
-    let final_balance = test_env.get_sui_balance_ab(sender);
+    let final_balance = test_env.get_sui_balance(sender);
 
     let expected_balance = (initial_balance as i128 - net_gas) as u64;
     assert_eq!(
@@ -2437,7 +2432,13 @@ async fn test_address_balance_large_rebate() {
 
 #[sim_test]
 async fn test_sponsored_address_balance_storage_oog() {
-    let mut test_env = TestEnvBuilder::new().build().await;
+    let mut test_env = TestEnvBuilder::new()
+        .with_proto_override_cb(Box::new(|_, mut cfg| {
+            cfg.enable_address_balance_gas_payments_for_testing();
+            cfg
+        }))
+        .build()
+        .await;
 
     let gas_package_id = test_env.setup_test_package(move_test_code_path()).await;
 
@@ -2534,7 +2535,14 @@ async fn test_sponsored_address_balance_storage_oog() {
 
 #[sim_test]
 async fn test_get_all_balances() {
-    let mut test_env = TestEnvBuilder::new().with_num_validators(1).build().await;
+    let mut test_env = TestEnvBuilder::new()
+        .with_proto_override_cb(Box::new(|_, mut cfg| {
+            cfg.enable_accumulators_for_testing();
+            cfg
+        }))
+        .with_num_validators(1)
+        .build()
+        .await;
 
     let sender = test_env.get_sender(0);
 
@@ -2660,6 +2668,8 @@ async fn publish_and_mint_trusted_coin(test_env: &mut TestEnv, sender: SuiAddres
 async fn test_reject_transaction_executed_in_previous_epoch() {
     let mut test_env = TestEnvBuilder::new()
         .with_proto_override_cb(Box::new(|_, mut cfg| {
+            cfg.enable_address_balance_gas_payments_for_testing();
+            cfg.enable_accumulators_for_testing();
             cfg.enable_multi_epoch_transaction_expiration_for_testing();
             cfg
         }))
@@ -2735,6 +2745,8 @@ async fn test_reject_transaction_executed_in_previous_epoch() {
 async fn test_transaction_executes_in_next_epoch_with_one_epoch_range() {
     let mut test_env = TestEnvBuilder::new()
         .with_proto_override_cb(Box::new(|_, mut cfg| {
+            cfg.enable_address_balance_gas_payments_for_testing();
+            cfg.enable_accumulators_for_testing();
             cfg.enable_multi_epoch_transaction_expiration_for_testing();
             cfg
         }))
@@ -2785,6 +2797,8 @@ async fn test_transaction_executes_in_next_epoch_with_one_epoch_range() {
 async fn test_reject_signing_transaction_executed_in_previous_epoch() {
     let mut test_env = TestEnvBuilder::new()
         .with_proto_override_cb(Box::new(|_, mut cfg| {
+            cfg.enable_address_balance_gas_payments_for_testing();
+            cfg.enable_accumulators_for_testing();
             cfg.enable_multi_epoch_transaction_expiration_for_testing();
             cfg
         }))
@@ -2855,6 +2869,10 @@ async fn test_reject_signing_transaction_executed_in_previous_epoch() {
 #[sim_test]
 async fn address_balance_stress_test() {
     telemetry_subscribers::init_for_testing();
+    let _guard = ProtocolConfig::apply_overrides_for_testing(|_, mut cfg| {
+        cfg.enable_accumulators_for_testing();
+        cfg
+    });
 
     let test_cluster = Arc::new(
         TestClusterBuilder::new()
@@ -3031,21 +3049,7 @@ async fn address_balance_stress_test() {
                             } else {
                                 exec_failure_count.fetch_add(1, Ordering::Relaxed);
                             }
-                            // On the IFFW short-circuit `effects.gas_object()` is `None` (the
-                            // executor never builds gas-charge metadata), but the gas coin is
-                            // still mutated. Fall back to looking up the input gas coin in
-                            // `mutated()` so subsequent transactions can chain off its new ref.
-                            current_gas = effects
-                                .gas_object()
-                                .map(|(obj_ref, _)| obj_ref)
-                                .or_else(|| {
-                                    effects
-                                        .mutated()
-                                        .into_iter()
-                                        .find(|(obj_ref, _)| obj_ref.0 == current_gas.0)
-                                        .map(|(obj_ref, _)| obj_ref)
-                                })
-                                .expect("gas coin must be present in effects");
+                            current_gas = effects.gas_object().0;
                         }
                         Err(err) => {
                             let err_str = err.to_string();
@@ -3104,7 +3108,14 @@ async fn address_balance_stress_test() {
 
 #[sim_test]
 async fn test_address_balance_gas_merge_accumulator_events() {
-    let mut test_env = TestEnvBuilder::new().with_num_validators(1).build().await;
+    let mut test_env = TestEnvBuilder::new()
+        .with_proto_override_cb(Box::new(|_, mut cfg| {
+            cfg.enable_address_balance_gas_payments_for_testing();
+            cfg
+        }))
+        .with_num_validators(1)
+        .build()
+        .await;
 
     let (sender, gas_objects) = test_env.get_sender_and_all_gas(0);
 
@@ -3203,7 +3214,14 @@ async fn test_funds_withdraw_scheduler_type_alternation() {
 
 #[sim_test]
 async fn test_simulate_address_funds_sufficient() {
-    let mut test_env = TestEnvBuilder::new().build().await;
+    let mut test_env = TestEnvBuilder::new()
+        .with_proto_override_cb(Box::new(|_, mut cfg| {
+            cfg.create_root_accumulator_object_for_testing();
+            cfg.enable_accumulators_for_testing();
+            cfg
+        }))
+        .build()
+        .await;
 
     let sender = test_env.get_sender(0);
     test_env.fund_one_address_balance(sender, 1000).await;
@@ -3224,7 +3242,14 @@ async fn test_simulate_address_funds_sufficient() {
 
 #[sim_test]
 async fn test_simulate_address_funds_insufficient() {
-    let mut test_env = TestEnvBuilder::new().build().await;
+    let mut test_env = TestEnvBuilder::new()
+        .with_proto_override_cb(Box::new(|_, mut cfg| {
+            cfg.create_root_accumulator_object_for_testing();
+            cfg.enable_accumulators_for_testing();
+            cfg
+        }))
+        .build()
+        .await;
 
     let sender = test_env.get_sender(0);
     test_env.fund_one_address_balance(sender, 100).await;
@@ -3246,6 +3271,8 @@ async fn test_simulate_address_funds_insufficient() {
 async fn test_simulate_object_funds_sufficient() {
     let mut test_env = TestEnvBuilder::new()
         .with_proto_override_cb(Box::new(|_, mut cfg| {
+            cfg.create_root_accumulator_object_for_testing();
+            cfg.enable_accumulators_for_testing();
             cfg.set_enable_object_funds_withdraw_for_testing(true);
             cfg
         }))
@@ -3277,6 +3304,8 @@ async fn test_simulate_object_funds_sufficient() {
 async fn test_simulate_object_funds_insufficient() {
     let mut test_env = TestEnvBuilder::new()
         .with_proto_override_cb(Box::new(|_, mut cfg| {
+            cfg.create_root_accumulator_object_for_testing();
+            cfg.enable_accumulators_for_testing();
             cfg.set_enable_object_funds_withdraw_for_testing(true);
             cfg
         }))
@@ -3307,11 +3336,15 @@ async fn test_simulate_object_funds_insufficient() {
     );
 }
 
-// TODO(address-balances): Re-enable this once input checks land
 #[sim_test]
-#[ignore = "address balance transactions still require an object"]
 async fn test_address_balance_gas_pay_all_sui() {
-    let mut test_env = TestEnvBuilder::new().build().await;
+    let mut test_env = TestEnvBuilder::new()
+        .with_proto_override_cb(Box::new(|_, mut cfg| {
+            cfg.enable_address_balance_gas_payments_for_testing();
+            cfg
+        }))
+        .build()
+        .await;
 
     let (sender, _gas_package_id) = setup_address_balance_account(&mut test_env, 10_000_000).await;
 
@@ -3331,19 +3364,19 @@ async fn test_address_balance_gas_pay_all_sui() {
         test_env.chain_id,
     );
 
-    // With gasless_transaction_drop_safety enabled, GasCoin is properly materialized
-    // for address balance gas payments, so TransferObjects([GasCoin], ...) succeeds.
     let signed_tx = test_env.cluster.sign_transaction(&tx).await;
-    let resp = test_env
+    let err = test_env
         .cluster
         .wallet
         .execute_transaction_may_fail(signed_tx)
         .await
-        .unwrap();
-    assert!(resp.effects.status().is_ok());
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("Argument::GasCoin is not supported with address balance gas payments"),
+    );
 
-    // Gas was paid from address balance and remaining balance transferred to recipient
-    test_env.verify_accumulator_removed(sender);
+    test_env.verify_accumulator_exists(sender, 10_000_000);
 }
 
 /// Test that transactions with address balance gas require replay protection.
@@ -3356,7 +3389,15 @@ async fn test_address_balance_gas_pay_all_sui() {
 /// (an immutable shared object) as input for "stateless" test cases.
 #[sim_test]
 async fn test_replay_protection_validation() {
-    let mut test_env = TestEnvBuilder::new().build().await;
+    let mut test_env = TestEnvBuilder::new()
+        .with_proto_override_cb(Box::new(|_, mut cfg| {
+            cfg.create_root_accumulator_object_for_testing();
+            cfg.enable_accumulators_for_testing();
+            cfg.enable_address_balance_gas_payments_for_testing();
+            cfg
+        }))
+        .build()
+        .await;
 
     let (sender, _) = test_env.get_sender_and_gas(0);
     test_env.fund_one_address_balance(sender, 100_000_000).await;
@@ -3579,7 +3620,14 @@ async fn test_replay_protection_validation() {
 /// Simulating a transaction with overflowing funds withdrawals must return an error.
 #[sim_test]
 async fn test_simulate_overflowing_funds_withdrawal_returns_error() {
-    let test_env = TestEnvBuilder::new().build().await;
+    let test_env = TestEnvBuilder::new()
+        .with_proto_override_cb(Box::new(|_, mut cfg| {
+            cfg.create_root_accumulator_object_for_testing();
+            cfg.enable_accumulators_for_testing();
+            cfg
+        }))
+        .build()
+        .await;
 
     let (sender, gas_objects) = test_env.get_sender_and_all_gas(0);
 
@@ -3603,7 +3651,14 @@ async fn test_simulate_overflowing_funds_withdrawal_returns_error() {
 
 #[sim_test]
 async fn test_two_large_reservations_overflow() {
-    let test_env = TestEnvBuilder::new().build().await;
+    let test_env = TestEnvBuilder::new()
+        .with_proto_override_cb(Box::new(|_, mut cfg| {
+            cfg.create_root_accumulator_object_for_testing();
+            cfg.enable_accumulators_for_testing();
+            cfg
+        }))
+        .build()
+        .await;
 
     let (sender, gas_objects) = test_env.get_sender_and_all_gas(0);
 
@@ -3641,7 +3696,13 @@ async fn test_json_rpc_balance_changes_with_address_balance_withdrawal() {
     use sui_json_rpc_types::{SuiTransactionBlockEffectsAPI, SuiTransactionBlockResponseOptions};
     use sui_types::transaction_driver_types::ExecuteTransactionRequestType;
 
-    let mut test_env = TestEnvBuilder::new().build().await;
+    let mut test_env = TestEnvBuilder::new()
+        .with_proto_override_cb(Box::new(|_, mut cfg| {
+            cfg.enable_address_balance_gas_payments_for_testing();
+            cfg
+        }))
+        .build()
+        .await;
 
     let (sender, gas_coin) = test_env.get_sender_and_gas(0);
     let receiver = SuiAddress::random_for_testing_only();
@@ -3853,317 +3914,4 @@ fn create_redeem_and_transfer_transaction(
             nonce,
         },
     })
-}
-
-/// Test that a transaction with both explicit withdrawals and implicit gas budget
-/// is rejected at signing time when the total exceeds available balance.
-///
-/// This is a regression test for a bug where get_funds_withdrawals() did not include the implicit
-/// gas budget reservation when gas_data.payment = []. This could cause callers to underestimate
-/// the total funds required by a transaction.
-#[sim_test]
-async fn test_explicit_withdrawal_plus_implicit_gas_exceeds_balance() {
-    let mut test_env = TestEnvBuilder::new().build().await;
-
-    let (sender, gas_coin) = test_env.get_sender_and_gas(0);
-    let receiver = SuiAddress::random_for_testing_only();
-
-    let deposit_amount = 5_000_000u64;
-    let deposit_tx = test_env
-        .tx_builder(sender)
-        .transfer_sui_to_address_balance(FundSource::coin(gas_coin), vec![(deposit_amount, sender)])
-        .build();
-    test_env.exec_tx_directly(deposit_tx).await.unwrap();
-    test_env.verify_accumulator_exists(sender, deposit_amount);
-
-    let withdraw_amount = 1_000_000u64;
-    let tx = create_redeem_and_transfer_transaction(
-        sender,
-        receiver,
-        withdraw_amount,
-        test_env.rgp,
-        test_env.chain_id,
-        0,
-    );
-
-    // Verify both explicit withdrawal and implicit gas are aggregated
-    let withdrawals = tx
-        .process_funds_withdrawals_for_signing(test_env.chain_id, &NoOpResolver)
-        .unwrap();
-    let sui_account_id = AccumulatorValue::get_field_id(
-        sender,
-        &WithdrawalTypeArg::Balance(GAS::type_tag()).to_type_tag(),
-    )
-    .unwrap();
-    // Total should be explicit withdrawal (1_000_000) + gas budget (10_000_000)
-    assert_eq!(*withdrawals.get(&sui_account_id).unwrap(), 11_000_000);
-    assert!(tx.is_gas_paid_from_address_balance());
-
-    let err = test_env.exec_tx_directly(tx).await.unwrap_err();
-    assert!(
-        err.to_string().contains("is less than requested"),
-        "Expected insufficient balance error, got: {}",
-        err
-    );
-
-    test_env.trigger_reconfiguration().await;
-}
-
-// gas-coin `send_funds` override + storage out-of-gas must not charge the receiver's address
-// balance.
-#[sim_test]
-async fn gas_coin_send_funds_storage_out_of_gas_charges_sender_not_receiver() {
-    let mut test_env = TestEnvBuilder::new()
-        .with_proto_override_cb(Box::new(|_, mut cfg| {
-            cfg.enable_address_balance_gas_payments_for_testing();
-            cfg
-        }))
-        .with_num_validators(1)
-        .build()
-        .await;
-
-    let gas_package_id = test_env.setup_test_package(move_test_code_path()).await;
-    let (sender, sender_gas) = test_env.get_sender_and_gas(0);
-    let (receiver, receiver_gas) = test_env.get_sender_and_gas(1);
-
-    let receiver_initial_balance = 100_000_000u64;
-    let deposit_tx = test_env
-        .tx_builder(receiver)
-        .transfer_sui_to_address_balance(
-            FundSource::coin(receiver_gas),
-            vec![(receiver_initial_balance, receiver)],
-        )
-        .build();
-    test_env.exec_tx_directly(deposit_tx).await.unwrap();
-    test_env.verify_accumulator_exists(receiver, receiver_initial_balance);
-
-    let create_input_tx =
-        create_storage_test_transaction_gas(sender, gas_package_id, sender_gas, test_env.rgp);
-    let (create_input_digest, create_input_effects) =
-        test_env.exec_tx_directly(create_input_tx).await.unwrap();
-    assert!(create_input_effects.status().is_ok());
-    let created_obj = create_input_effects.created()[0].0;
-    test_env
-        .cluster
-        .wait_for_tx_settlement(&[create_input_digest])
-        .await;
-    test_env.update_all_gas().await;
-    let (_, sender_gas) = test_env.get_sender_and_gas(0);
-
-    let mut builder = ProgrammableTransactionBuilder::new();
-    let receiver_arg = builder.pure(receiver).unwrap();
-    builder.programmable_move_call(
-        SUI_FRAMEWORK_PACKAGE_ID,
-        Identifier::new("coin").unwrap(),
-        Identifier::new("send_funds").unwrap(),
-        vec![GAS::type_tag()],
-        vec![Argument::GasCoin, receiver_arg],
-    );
-
-    let obj_arg = builder
-        .obj(ObjectArg::ImmOrOwnedObject(created_obj))
-        .unwrap();
-    builder.programmable_move_call(
-        gas_package_id,
-        Identifier::new("gas_test").unwrap(),
-        Identifier::new("delete_object").unwrap(),
-        vec![],
-        vec![obj_arg],
-    );
-
-    let value = builder.pure(42u64).unwrap();
-    let large_data = vec![0u8; 200];
-    let data_arg = builder.pure(large_data).unwrap();
-    builder.programmable_move_call(
-        gas_package_id,
-        Identifier::new("gas_test").unwrap(),
-        Identifier::new("create_object_with_large_storage").unwrap(),
-        vec![],
-        vec![value, data_arg],
-    );
-
-    let low_budget = 2_500_000u64;
-    let tx_kind = TransactionKind::ProgrammableTransaction(builder.finish());
-    let tx = TransactionData::new(tx_kind, sender, sender_gas, low_budget, test_env.rgp);
-    let (_, effects) = test_env.exec_tx_directly(tx).await.unwrap();
-
-    let (error_kind, _) = effects.status().clone().unwrap_err();
-    assert!(
-        matches!(
-            error_kind,
-            sui_types::execution_status::ExecutionErrorKind::InsufficientGas
-        ),
-        "Expected InsufficientGas, got: {:?}",
-        error_kind
-    );
-
-    let gas_summary = effects.gas_cost_summary();
-    assert!(
-        gas_summary.storage_cost > 0,
-        "Storage cost should be non-zero"
-    );
-
-    let acc_events = effects.accumulator_events();
-    for event in &acc_events {
-        assert_ne!(
-            event.write.address.address, receiver,
-            "receiver must not be charged; events: {:?}",
-            acc_events
-        );
-    }
-
-    test_env.verify_accumulator_exists(receiver, receiver_initial_balance);
-    // Reconfig runs SUI conservation invariant checks across the epoch boundary
-    test_env.cluster.trigger_reconfiguration().await;
-}
-
-// address-balance gas + `TransferObjects([GasCoin], receiver)` + storage out-of-gas must not
-// panic.
-#[sim_test]
-async fn address_balance_gas_transfer_storage_objects_out_of_gas_no_panic() {
-    let mut test_env = TestEnvBuilder::new()
-        .with_proto_override_cb(Box::new(|_, mut cfg| {
-            cfg.enable_address_balance_gas_payments_for_testing();
-            cfg
-        }))
-        .with_num_validators(1)
-        .build()
-        .await;
-
-    let gas_package_id = test_env.setup_test_package(move_test_code_path()).await;
-
-    let (sender, sender_gas) = test_env.get_sender_and_gas(0);
-
-    let sender_initial_balance = 100_000_000u64;
-    let deposit_tx = test_env
-        .tx_builder(sender)
-        .transfer_sui_to_address_balance(
-            FundSource::coin(sender_gas),
-            vec![(sender_initial_balance, sender)],
-        )
-        .build();
-    test_env.exec_tx_directly(deposit_tx).await.unwrap();
-    test_env.verify_accumulator_exists(sender, sender_initial_balance);
-
-    let receiver = SuiAddress::random_for_testing_only();
-
-    let mut builder = ProgrammableTransactionBuilder::new();
-    let receiver_arg = builder.pure(receiver).unwrap();
-    builder.command(Command::TransferObjects(
-        vec![Argument::GasCoin],
-        receiver_arg,
-    ));
-
-    let value = builder.pure(42u64).unwrap();
-    let large_data = vec![0u8; 200];
-    let data_arg = builder.pure(large_data).unwrap();
-    builder.programmable_move_call(
-        gas_package_id,
-        Identifier::new("gas_test").unwrap(),
-        Identifier::new("create_object_with_large_storage").unwrap(),
-        vec![],
-        vec![value, data_arg],
-    );
-
-    let low_budget = 2_500_000u64;
-    let tx_kind = TransactionKind::ProgrammableTransaction(builder.finish());
-    let tx = create_address_balance_transaction(
-        tx_kind,
-        sender,
-        low_budget,
-        test_env.rgp,
-        test_env.chain_id,
-    );
-
-    let (_, effects) = test_env
-        .exec_tx_directly(tx)
-        .await
-        .expect("execution must not panic");
-
-    let (error_kind, _) = effects.status().clone().unwrap_err();
-    assert!(
-        matches!(
-            error_kind,
-            sui_types::execution_status::ExecutionErrorKind::InsufficientGas
-        ),
-        "Expected InsufficientGas, got: {:?}",
-        error_kind
-    );
-
-    let acc_events = effects.accumulator_events();
-    let sender_debit: i128 = acc_events
-        .iter()
-        .filter(|e| e.write.address.address == sender)
-        .filter_map(|e| match (&e.write.operation, &e.write.value) {
-            (
-                sui_types::effects::AccumulatorOperation::Split,
-                sui_types::effects::AccumulatorValue::Integer(v),
-            ) => Some(*v as i128),
-            _ => None,
-        })
-        .sum();
-    assert!(
-        sender_debit > 0,
-        "sender's address balance should be debited for gas; events: {:?}",
-        acc_events
-    );
-
-    for event in &acc_events {
-        assert_ne!(
-            event.write.address.address, receiver,
-            "receiver must not be charged; events: {:?}",
-            acc_events
-        );
-    }
-
-    // Reconfig runs SUI conservation invariant checks across the epoch boundary
-    test_env.cluster.trigger_reconfiguration().await;
-}
-
-#[tokio::test]
-async fn poc_double_withdrawal_across_epoch_boundary() {
-    let mut test_env = TestEnvBuilder::new().build().await;
-    let sender = test_env.get_sender(0);
-
-    // Step 1: Deposit 1000 MIST into address balance
-    test_env.fund_one_address_balance(sender, 1000).await;
-    test_env.verify_accumulator_exists(sender, 1000);
-    println!("Deposited: 1000 MIST");
-
-    // Step 2: TX-A — withdraw 1000 in epoch 0
-    let tx_a = test_env
-        .tx_builder(sender)
-        .transfer_sui_to_address_balance(
-            FundSource::address_fund_with_reservation(1000),
-            vec![(1000, dbg_addr(2))],
-        )
-        .build();
-    test_env.exec_tx_directly(tx_a).await.unwrap();
-    println!("TX-A (epoch 0): success");
-
-    // Step 3: Trigger epoch boundary BEFORE settlement of TX-A
-    test_env.trigger_reconfiguration().await;
-    println!("Epoch boundary triggered");
-
-    // Step 4: TX-B — try to withdraw 1000 again in epoch 1
-    // With the bug: new scheduler reads stale balance = 1000
-    // This should FAIL if system is correct
-    // If it SUCCEEDS = CRITICAL double withdrawal = supply inflation
-    let tx_b = test_env
-        .tx_builder(sender)
-        .transfer_sui_to_address_balance(
-            FundSource::address_fund_with_reservation(1000),
-            vec![(1000, dbg_addr(3))],
-        )
-        .build();
-
-    match test_env.exec_tx_directly(tx_b).await {
-        Ok(_) => {
-            println!("CRITICAL: TX-B SUCCEEDED = DOUBLE WITHDRAWAL CONFIRMED");
-            println!("Deposited: 1000 MIST, Extracted: 2000 MIST = SUPPLY INFLATION");
-        }
-        Err(e) => {
-            println!("TX-B failed (system correct): {}", e);
-        }
-    }
 }
