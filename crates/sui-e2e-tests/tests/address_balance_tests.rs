@@ -3216,7 +3216,7 @@ async fn test_simulate_address_funds_sufficient() {
     let result = test_env
         .cluster
         .grpc_client()
-        .simulate_transaction(&tx, false, false)
+        .simulate_transaction(&tx, false)
         .await
         .unwrap();
     assert!(result.transaction.effects.status().is_ok());
@@ -3237,7 +3237,7 @@ async fn test_simulate_address_funds_insufficient() {
     let result = test_env
         .cluster
         .grpc_client()
-        .simulate_transaction(&tx, false, false)
+        .simulate_transaction(&tx, false)
         .await;
     assert!(result.is_err());
 }
@@ -3267,7 +3267,7 @@ async fn test_simulate_object_funds_sufficient() {
     let result = test_env
         .cluster
         .grpc_client()
-        .simulate_transaction(&tx, false, false)
+        .simulate_transaction(&tx, false)
         .await
         .unwrap();
     assert!(result.transaction.effects.status().is_ok());
@@ -3298,7 +3298,7 @@ async fn test_simulate_object_funds_insufficient() {
     let result = test_env
         .cluster
         .grpc_client()
-        .simulate_transaction(&tx, false, false)
+        .simulate_transaction(&tx, false)
         .await
         .unwrap();
     assert!(
@@ -3596,7 +3596,7 @@ async fn test_simulate_overflowing_funds_withdrawal_returns_error() {
     let result = test_env
         .cluster
         .grpc_client()
-        .simulate_transaction(&tx, false, false)
+        .simulate_transaction(&tx, false)
         .await;
     assert!(result.is_err());
 }
@@ -3624,7 +3624,7 @@ async fn test_two_large_reservations_overflow() {
     let result = test_env
         .cluster
         .grpc_client()
-        .simulate_transaction(&tx, false, false)
+        .simulate_transaction(&tx, false)
         .await;
     assert!(result.is_err());
 }
@@ -3896,7 +3896,7 @@ async fn test_explicit_withdrawal_plus_implicit_gas_exceeds_balance() {
     )
     .unwrap();
     // Total should be explicit withdrawal (1_000_000) + gas budget (10_000_000)
-    assert_eq!(withdrawals.get(&sui_account_id).unwrap().0, 11_000_000);
+    assert_eq!(*withdrawals.get(&sui_account_id).unwrap(), 11_000_000);
     assert!(tx.is_gas_paid_from_address_balance());
 
     let err = test_env.exec_tx_directly(tx).await.unwrap_err();
