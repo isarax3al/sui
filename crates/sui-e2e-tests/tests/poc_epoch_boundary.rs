@@ -6,7 +6,7 @@ use sui_types::base_types::dbg_addr;
 use sui_test_transaction_builder::FundSource;
 use test_cluster::addr_balance_test_env::TestEnvBuilder;
 
-#[tokio::test]
+#[sim_test]
 async fn poc_double_withdrawal_across_epoch_boundary() {
     let mut test_env = TestEnvBuilder::new().build().await;
     let sender = test_env.get_sender(0);
