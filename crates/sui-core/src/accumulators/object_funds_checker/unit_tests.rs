@@ -392,3 +392,41 @@ async fn test_should_commit_early_exits() {
         &epoch_store,
     ));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn poc_toctou_concurrent_coin_reservation() {
+    use futures::future::join_all;
+    use std::sync::Arc;
+    use tokio::sync::Barrier;
+    let account = ObjectID::random();
+    let version = SequenceNumber::from_u64(0);
+    let funds_read = Arc::new(MockFundsRead::new(
+        version,
+        BTreeMap::from([(account, 1000u128)]),
+    ));
+    let checker = Arc::new(ObjectFundsChecker::new(
+        version,
+        Arc::new(ObjectFundsCheckerMetrics::new(&prometheus::Registry::new())),
+    ));
+    let barrier = Arc::new(Barrier::new(2));
+    let handles: Vec<_> = (0..2).map(|_| {
+        let checker = checker.clone();
+        let funds_read = funds_read.clone();
+        let barrier = barrier.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            let status = checker.check_object_funds(
+                BTreeMap::from([(AccumulatorObjId::new_unchecked(account), 1000u128)]),
+                version,
+                funds_read.as_ref(),
+            );
+            matches!(status, ObjectFundsWithdrawStatus::SufficientFunds)
+        })
+    }).collect();
+    let results: Vec<bool> = join_all(handles).await
+        .into_iter().map(|r| r.unwrap()).collect();
+    let approved = results.iter().filter(|&&r| r).count();
+    println!("TOCTOU test: {}/2 approved from balance=1000", approved);
+    assert_eq!(approved, 2,
+        "CRITICAL TOCTOU: both withdrawals approved despite insufficient combined funds");
+}
