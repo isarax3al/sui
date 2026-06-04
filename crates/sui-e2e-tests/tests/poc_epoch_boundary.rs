@@ -20,6 +20,7 @@ async fn poc_double_withdrawal_across_epoch_boundary() {
         .tx_builder(sender)
         .transfer_sui_to_address_balance(
             FundSource::address_fund_with_reservation(1000),
+            vec![(1000, dbg_addr(2))],
         )
         .build();
     test_env.exec_tx_directly(tx_a).await.unwrap();
@@ -30,6 +31,7 @@ async fn poc_double_withdrawal_across_epoch_boundary() {
         .tx_builder(sender)
         .transfer_sui_to_address_balance(
             FundSource::address_fund_with_reservation(1000),
+            vec![(1000, dbg_addr(3))],
         )
         .build();
     match test_env.exec_tx_directly(tx_b).await {
