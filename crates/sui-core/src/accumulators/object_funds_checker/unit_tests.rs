@@ -430,3 +430,47 @@ async fn poc_toctou_concurrent_coin_reservation() {
     assert_eq!(approved, 2,
         "CRITICAL TOCTOU: both withdrawals approved despite insufficient combined funds");
 }
+
+#[test]
+fn poc_toctou_os_threads() {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    let account = ObjectID::random();
+    let version = SequenceNumber::from_u64(0);
+    let funds_read = Arc::new(MockFundsRead::new(
+        version,
+        BTreeMap::from([(account, 1000u128)]),
+    ));
+
+    // Run 10000 iterations to trigger the race
+    for i in 0..10000 {
+        // Fresh checker each iteration
+        let checker = Arc::new(ObjectFundsChecker::new(
+            version,
+            Arc::new(ObjectFundsCheckerMetrics::new(&prometheus::Registry::new())),
+        ));
+        let barrier = Arc::new(Barrier::new(2));
+        let handles: Vec<_> = (0..2).map(|_| {
+            let checker = checker.clone();
+            let funds_read = funds_read.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                barrier.wait(); // True parallel entry
+                let status = checker.check_object_funds(
+                    BTreeMap::from([(AccumulatorObjId::new_unchecked(account), 1000u128)]),
+                    version,
+                    funds_read.as_ref(),
+                );
+                matches!(status, ObjectFundsWithdrawStatus::SufficientFunds)
+            })
+        }).collect();
+        let results: Vec<bool> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let approved = results.iter().filter(|&&r| r).count();
+        if approved == 2 {
+            println!("CRITICAL TOCTOU RACE at iteration {}!", i);
+            return; // Test PASSES = race found
+        }
+    }
+    panic!("TOCTOU not triggered in 10000 attempts (race window may be too small)");
+}
