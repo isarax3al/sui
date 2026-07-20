@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use move_binary_format::file_format::{
-    AddressIdentifierIndex, Bytecode, CodeUnit, Constant, ConstantPoolIndex, FunctionDefinition,
-    FunctionHandle, FunctionHandleIndex, IdentifierIndex, ModuleHandle, ModuleHandleIndex, Signature,
-    SignatureIndex,
-    SignatureToken::{Address, MutableReference, Reference},
-    Visibility, empty_module,
+    AbilitySet, AddressIdentifierIndex, Bytecode, CodeUnit, Constant, ConstantPoolIndex,
+    DatatypeHandle, DatatypeHandleIndex, FieldDefinition, FieldHandle, FieldHandleIndex,
+    FunctionDefinition, FunctionHandle, FunctionHandleIndex, IdentifierIndex, ModuleHandle,
+    ModuleHandleIndex, Signature, SignatureIndex,
+    SignatureToken::{Address, Datatype, MutableReference, Reference},
+    StructDefinition, StructDefinitionIndex, StructFieldInformation, TypeSignature, Visibility,
+    empty_module,
 };
 use move_bytecode_verifier::{
     ability_cache::AbilityCache,
@@ -99,17 +101,90 @@ fn make_module(code: Vec<Bytecode>) -> move_binary_format::file_format::Compiled
     module
 }
 
-fn result_status(
-    result: move_binary_format::errors::VMResult<()>,
-) -> String {
+fn make_struct_module(code: Vec<Bytecode>) -> move_binary_format::file_format::CompiledModule {
+    let mut module = empty_module();
+    module.version = 5;
+
+    // Existing identifier 0 is the module name. Added identifiers are 1=probe, 2=S, 3=f.
+    module.identifiers.extend([
+        Identifier::from_str("struct_probe").unwrap(),
+        Identifier::from_str("S").unwrap(),
+        Identifier::from_str("f").unwrap(),
+    ]);
+
+    module.datatype_handles.push(DatatypeHandle {
+        module: ModuleHandleIndex(0),
+        name: IdentifierIndex(2),
+        abilities: AbilitySet::PRIMITIVES,
+        type_parameters: vec![],
+    });
+    module.struct_defs.push(StructDefinition {
+        struct_handle: DatatypeHandleIndex(0),
+        field_information: StructFieldInformation::Declared(vec![FieldDefinition {
+            name: IdentifierIndex(3),
+            signature: TypeSignature(Address),
+        }]),
+    });
+    module.field_handles.push(FieldHandle {
+        owner: StructDefinitionIndex(0),
+        field: 0,
+    });
+
+    let struct_ty = Datatype(DatatypeHandleIndex(0));
+    let mut_ref_struct = MutableReference(Box::new(struct_ty.clone()));
+    let imm_ref_struct = Reference(Box::new(struct_ty.clone()));
+    let imm_ref_address = Reference(Box::new(Address));
+    let mut_ref_address = MutableReference(Box::new(Address));
+
+    module.signatures = vec![
+        Signature(vec![struct_ty]),
+        Signature(vec![]),
+        // Param is local 0. Extra locals: 1=&mut S, 2=&S, 3=&address, 4=&mut address.
+        Signature(vec![
+            mut_ref_struct,
+            imm_ref_struct,
+            imm_ref_address,
+            mut_ref_address,
+        ]),
+    ];
+
+    module.function_handles.push(FunctionHandle {
+        module: ModuleHandleIndex(0),
+        name: IdentifierIndex(1),
+        parameters: SignatureIndex(0),
+        return_: SignatureIndex(1),
+        type_parameters: vec![],
+    });
+    module.constant_pool.push(Constant {
+        type_: Address,
+        data: AccountAddress::ONE.into_bytes().to_vec(),
+    });
+    module.function_defs.push(FunctionDefinition {
+        code: Some(CodeUnit {
+            locals: SignatureIndex(2),
+            code,
+            jump_tables: vec![],
+        }),
+        function: FunctionHandleIndex(0),
+        visibility: Visibility::Public,
+        is_entry: false,
+        acquires_global_resources: vec![],
+    });
+
+    module
+}
+
+fn result_status(result: move_binary_format::errors::VMResult<()>) -> String {
     match result {
         Ok(()) => "ACCEPT".to_string(),
         Err(err) => format!("REJECT({:?})", err.major_status()),
     }
 }
 
-fn run_case(name: &str, code: Vec<Bytecode>) {
-    let module = make_module(code);
+fn run_module_case(
+    name: &str,
+    module: move_binary_format::file_format::CompiledModule,
+) {
     let mut preflight_cache = AbilityCache::new(&module);
     let preflight = verify_module_with_config_metered_up_to_code_units(
         &config(false),
@@ -142,6 +217,14 @@ fn run_case(name: &str, code: Vec<Bytecode>) {
         result_status(legacy),
         result_status(regex)
     );
+}
+
+fn run_case(name: &str, code: Vec<Bytecode>) {
+    run_module_case(name, make_module(code));
+}
+
+fn run_struct_case(name: &str, code: Vec<Bytecode>) {
+    run_module_case(name, make_struct_module(code));
 }
 
 fn main() {
@@ -212,6 +295,119 @@ fn main() {
             MoveLoc(1),
             MoveLoc(2),
             Call(FunctionHandleIndex(2)),
+            Ret,
+        ],
+    );
+
+    // Create a root mutable alias first, then derive an immutable field reference through a second
+    // root alias. Replacing the whole struct must be rejected while the field reference is alive.
+    run_struct_case(
+        "mut_root_then_imm_field_then_root_write",
+        vec![
+            MutBorrowLoc(0),
+            StLoc(1),
+            ImmBorrowLoc(0),
+            ImmBorrowField(FieldHandleIndex(0)),
+            StLoc(3),
+            LdConst(ConstantPoolIndex(0)),
+            Pack(StructDefinitionIndex(0)),
+            MoveLoc(1),
+            WriteRef,
+            MoveLoc(3),
+            ReadRef,
+            Pop,
+            Ret,
+        ],
+    );
+
+    // Reverse creation order to exercise graph edge propagation in the opposite direction.
+    run_struct_case(
+        "imm_field_then_mut_root_then_root_write",
+        vec![
+            ImmBorrowLoc(0),
+            ImmBorrowField(FieldHandleIndex(0)),
+            StLoc(3),
+            MutBorrowLoc(0),
+            StLoc(1),
+            LdConst(ConstantPoolIndex(0)),
+            Pack(StructDefinitionIndex(0)),
+            MoveLoc(1),
+            WriteRef,
+            MoveLoc(3),
+            ReadRef,
+            Pop,
+            Ret,
+        ],
+    );
+
+    // A mutable field reference is even stronger: overwriting the root must not detach the field
+    // while leaving a writable reference to the old value.
+    run_struct_case(
+        "mut_field_then_second_mut_root_write",
+        vec![
+            MutBorrowLoc(0),
+            MutBorrowField(FieldHandleIndex(0)),
+            StLoc(4),
+            MutBorrowLoc(0),
+            StLoc(1),
+            LdConst(ConstantPoolIndex(0)),
+            Pack(StructDefinitionIndex(0)),
+            MoveLoc(1),
+            WriteRef,
+            LdConst(ConstantPoolIndex(0)),
+            MoveLoc(4),
+            WriteRef,
+            Ret,
+        ],
+    );
+
+    // StLoc replaces the local slot directly. A live field reference must prevent this replacement.
+    run_struct_case(
+        "imm_field_then_stloc_parent",
+        vec![
+            ImmBorrowLoc(0),
+            ImmBorrowField(FieldHandleIndex(0)),
+            StLoc(3),
+            LdConst(ConstantPoolIndex(0)),
+            Pack(StructDefinitionIndex(0)),
+            StLoc(0),
+            MoveLoc(3),
+            ReadRef,
+            Pop,
+            Ret,
+        ],
+    );
+
+    run_struct_case(
+        "mut_field_then_stloc_parent",
+        vec![
+            MutBorrowLoc(0),
+            MutBorrowField(FieldHandleIndex(0)),
+            StLoc(4),
+            LdConst(ConstantPoolIndex(0)),
+            Pack(StructDefinitionIndex(0)),
+            StLoc(0),
+            LdConst(ConstantPoolIndex(0)),
+            MoveLoc(4),
+            WriteRef,
+            Ret,
+        ],
+    );
+
+    // Direct equal aliases are the intended relaxation candidate: replacement may be safe if the
+    // reference follows the local slot. This case separates that behavior from stale field refs.
+    run_struct_case(
+        "direct_imm_alias_then_stloc_parent",
+        vec![
+            ImmBorrowLoc(0),
+            StLoc(2),
+            LdConst(ConstantPoolIndex(0)),
+            Pack(StructDefinitionIndex(0)),
+            StLoc(0),
+            MoveLoc(2),
+            ImmBorrowField(FieldHandleIndex(0)),
+            ReadRef,
+            Pop,
             Ret,
         ],
     );
