@@ -14,7 +14,7 @@ jobs:
     if: github.event.issue.pull_request && github.event.comment.body == '/status-reference-safety-diff-fuzz'
     runs-on: ubuntu-latest
     steps:
-      - name: Compact old results and post run status
+      - name: Post research workflow status
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
@@ -22,18 +22,19 @@ jobs:
         shell: bash
         run: |
           gh api "repos/$REPOSITORY/issues/$ISSUE_NUMBER/comments" --paginate \
-            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("## Reference-safety differential fuzz result"))) | .id' \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and ((.body | startswith("## Reference-safety differential fuzz result")) or (.body | startswith("## Differential fuzz run status")))) | .id' \
             | while read -r id; do
                 [ -n "$id" ] && gh api -X DELETE "repos/$REPOSITORY/issues/comments/$id" || true
               done
 
-          gh run list --repo "$REPOSITORY" --workflow "Reference Safety Differential Runner" --limit 8 \
-            --json databaseId,event,status,conclusion,createdAt,updatedAt,headSha \
-            --template '{{range .}}{{printf "run=%v event=%s status=%s conclusion=%s created=%s updated=%s head=%s\n" .databaseId .event .status .conclusion .createdAt .updatedAt .headSha}}{{end}}' \
-            > /tmp/run-status.txt
+          gh run list --repo "$REPOSITORY" --limit 20 \
+            --json databaseId,workflowName,event,status,conclusion,createdAt,updatedAt,headSha \
+            --template '{{range .}}{{printf "workflow=%s run=%v event=%s status=%s conclusion=%s created=%s updated=%s head=%s\n" .workflowName .databaseId .event .status .conclusion .createdAt .updatedAt .headSha}}{{end}}' \
+            | grep -E 'Reference Safety (Differential Runner|Escalation Probe)' \
+            > /tmp/run-status.txt || true
 
           {
-            echo "## Differential fuzz run status"
+            echo "## Reference-safety research status"
             echo
             echo '```text'
             cat /tmp/run-status.txt
