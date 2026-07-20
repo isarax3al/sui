@@ -11,7 +11,12 @@ use move_binary_format::file_format::{
     SignatureToken::{Address, Bool, U64, U128},
     StructDefinition, StructFieldInformation, TypeSignature, Visibility, empty_module,
 };
-use move_bytecode_verifier::verify_module_with_config_unmetered;
+use move_bytecode_verifier::{
+    ability_cache::AbilityCache,
+    code_unit_verifier,
+    verifier::verify_module_with_config_metered_up_to_code_units,
+};
+use move_bytecode_verifier_meter::dummy::DummyMeter;
 use move_core_types::{
     account_address::AccountAddress, identifier::Identifier, vm_status::StatusCode,
 };
@@ -19,10 +24,20 @@ use move_vm_config::verifier::VerifierConfig;
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     str::FromStr,
-    sync::Once,
+    sync::{
+        Once,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 static INSTALL_QUIET_PANIC_HOOK: Once = Once::new();
+static TOTAL_INPUTS: AtomicU64 = AtomicU64::new(0);
+static COMMON_PREFLIGHT_OK: AtomicU64 = AtomicU64::new(0);
+static BOTH_CODE_UNIT_RUNS_COMPLETED: AtomicU64 = AtomicU64::new(0);
+static LEGACY_ACCEPTS: AtomicU64 = AtomicU64::new(0);
+static REGEX_ACCEPTS: AtomicU64 = AtomicU64::new(0);
+static EXPECTED_DIRECTION_DIFFERENCES: AtomicU64 = AtomicU64::new(0);
+static DANGEROUS_DIRECTION_DIFFERENCES: AtomicU64 = AtomicU64::new(0);
 
 fn module_from_code_unit(code_unit: CodeUnit) -> move_binary_format::file_format::CompiledModule {
     // Keep this module shape aligned with the existing code_unit fuzz target. The only fuzzed
@@ -100,36 +115,99 @@ fn config(use_regex: bool) -> VerifierConfig {
     config
 }
 
+fn print_stats(total: u64) {
+    if total % 100_000 != 0 {
+        return;
+    }
+    eprintln!(
+        "DIFF_FUZZ_STATS total={} preflight_ok={} code_unit_both_completed={} legacy_accepts={} regex_accepts={} expected_direction={} dangerous_direction={}",
+        total,
+        COMMON_PREFLIGHT_OK.load(Ordering::Relaxed),
+        BOTH_CODE_UNIT_RUNS_COMPLETED.load(Ordering::Relaxed),
+        LEGACY_ACCEPTS.load(Ordering::Relaxed),
+        REGEX_ACCEPTS.load(Ordering::Relaxed),
+        EXPECTED_DIRECTION_DIFFERENCES.load(Ordering::Relaxed),
+        DANGEROUS_DIRECTION_DIFFERENCES.load(Ordering::Relaxed),
+    );
+}
+
 fuzz_target!(|code_unit: CodeUnit| {
-    // Arbitrary CodeUnit generation deliberately explores malformed programs. Some common verifier
-    // layers contain invariant assertions for impossible bytecode shapes. Those panics occur before
-    // either reference-safety implementation and are not differential security findings.
     INSTALL_QUIET_PANIC_HOOK.call_once(|| std::panic::set_hook(Box::new(|_| {})));
+
+    let total = TOTAL_INPUTS.fetch_add(1, Ordering::Relaxed) + 1;
+    print_stats(total);
 
     let module = module_from_code_unit(code_unit);
 
+    // Run all module-level checks shared by both implementations once. Inputs that cannot reach the
+    // code-unit verifier are not useful for this differential campaign.
+    let common_preflight = catch_unwind(AssertUnwindSafe(|| {
+        let mut ability_cache = AbilityCache::new(&module);
+        verify_module_with_config_metered_up_to_code_units(
+            &config(false),
+            &module,
+            &mut ability_cache,
+            &mut DummyMeter,
+        )
+    }));
+    let Ok(Ok(())) = common_preflight else {
+        return;
+    };
+    COMMON_PREFLIGHT_OK.fetch_add(1, Ordering::Relaxed);
+
+    // Now compare the same code unit under identical configuration except for the selected
+    // reference-safety implementation.
     let legacy = catch_unwind(AssertUnwindSafe(|| {
-        verify_module_with_config_unmetered(&config(false), &module)
+        let mut ability_cache = AbilityCache::new(&module);
+        code_unit_verifier::verify_module(
+            &config(false),
+            &module,
+            &mut ability_cache,
+            &mut DummyMeter,
+        )
     }));
     let regex = catch_unwind(AssertUnwindSafe(|| {
-        verify_module_with_config_unmetered(&config(true), &module)
+        let mut ability_cache = AbilityCache::new(&module);
+        code_unit_verifier::verify_module(
+            &config(true),
+            &module,
+            &mut ability_cache,
+            &mut DummyMeter,
+        )
     }));
 
     let (Ok(legacy), Ok(regex)) = (legacy, regex) else {
         return;
     };
+    BOTH_CODE_UNIT_RUNS_COMPLETED.fetch_add(1, Ordering::Relaxed);
 
-    // The migration-risk direction is legacy rejecting while regex accepts. Complexity failures
-    // are excluded because they are resource-limit differences, not evidence of unsoundness.
-    if let (Err(legacy_err), Ok(())) = (legacy, regex) {
-        let status = legacy_err.major_status();
-        if !matches!(
-            status,
-            StatusCode::CONSTRAINT_NOT_SATISFIED | StatusCode::PROGRAM_TOO_COMPLEX
-        ) {
-            panic!(
-                "dangerous reference-safety divergence: legacy rejected with {status:?}, regex accepted; module={module:#?}"
-            );
+    if legacy.is_ok() {
+        LEGACY_ACCEPTS.fetch_add(1, Ordering::Relaxed);
+    }
+    if regex.is_ok() {
+        REGEX_ACCEPTS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    match (legacy, regex) {
+        (Ok(()), Err(_)) => {
+            // This is the direction the production sanity assertion is designed to catch.
+            EXPECTED_DIRECTION_DIFFERENCES.fetch_add(1, Ordering::Relaxed);
         }
+        (Err(legacy_err), Ok(())) => {
+            let status = legacy_err.major_status();
+            if matches!(
+                status,
+                StatusCode::CONSTRAINT_NOT_SATISFIED | StatusCode::PROGRAM_TOO_COMPLEX
+            ) {
+                return;
+            }
+
+            DANGEROUS_DIRECTION_DIFFERENCES.fetch_add(1, Ordering::Relaxed);
+            eprintln!(
+                "DANGEROUS_REFERENCE_SAFETY_DIVERGENCE legacy_status={status:?} module={module:#?}"
+            );
+            panic!("legacy reference safety rejected while regex reference safety accepted");
+        }
+        (Ok(()), Ok(())) | (Err(_), Err(_)) => {}
     }
 });
