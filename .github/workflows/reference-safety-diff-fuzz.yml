@@ -1,0 +1,67 @@
+name: Reference Safety Differential Fuzz
+
+on:
+  push:
+    branches:
+      - research/regex-reference-safety-diff-fuzz
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fuzz:
+    name: Differential libFuzzer
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: external-crates/move
+
+      - name: Install cargo-fuzz
+        run: cargo +nightly install cargo-fuzz --locked
+
+      - name: Run differential fuzz target
+        id: fuzz
+        shell: bash
+        run: |
+          set +e
+          cd external-crates/move/crates/bytecode-verifier-libfuzzer
+          mkdir -p corpus/reference_safety_diff artifacts/reference_safety_diff
+          cargo +nightly fuzz run reference_safety_diff corpus/reference_safety_diff \
+            -- \
+            -max_total_time=1500 \
+            -max_len=8192 \
+            -timeout=10 \
+            -rss_limit_mb=6000 \
+            -print_final_stats=1 \
+            -artifact_prefix=artifacts/reference_safety_diff/ \
+            2>&1 | tee reference_safety_diff.log
+          status=${PIPESTATUS[0]}
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
+
+      - name: Upload fuzz corpus and crashes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reference-safety-diff-fuzz-results
+          if-no-files-found: warn
+          retention-days: 7
+          path: |
+            external-crates/move/crates/bytecode-verifier-libfuzzer/reference_safety_diff.log
+            external-crates/move/crates/bytecode-verifier-libfuzzer/corpus/reference_safety_diff/
+            external-crates/move/crates/bytecode-verifier-libfuzzer/artifacts/reference_safety_diff/
