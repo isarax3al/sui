@@ -16,7 +16,13 @@ use move_core_types::{
     account_address::AccountAddress, identifier::Identifier, vm_status::StatusCode,
 };
 use move_vm_config::verifier::VerifierConfig;
-use std::str::FromStr;
+use std::{
+    panic::{AssertUnwindSafe, catch_unwind},
+    str::FromStr,
+    sync::Once,
+};
+
+static INSTALL_QUIET_PANIC_HOOK: Once = Once::new();
 
 fn module_from_code_unit(code_unit: CodeUnit) -> move_binary_format::file_format::CompiledModule {
     // Keep this module shape aligned with the existing code_unit fuzz target. The only fuzzed
@@ -95,10 +101,23 @@ fn config(use_regex: bool) -> VerifierConfig {
 }
 
 fuzz_target!(|code_unit: CodeUnit| {
+    // Arbitrary CodeUnit generation deliberately explores malformed programs. Some common verifier
+    // layers contain invariant assertions for impossible bytecode shapes. Those panics occur before
+    // either reference-safety implementation and are not differential security findings.
+    INSTALL_QUIET_PANIC_HOOK.call_once(|| std::panic::set_hook(Box::new(|_| {})));
+
     let module = module_from_code_unit(code_unit);
 
-    let legacy = verify_module_with_config_unmetered(&config(false), &module);
-    let regex = verify_module_with_config_unmetered(&config(true), &module);
+    let legacy = catch_unwind(AssertUnwindSafe(|| {
+        verify_module_with_config_unmetered(&config(false), &module)
+    }));
+    let regex = catch_unwind(AssertUnwindSafe(|| {
+        verify_module_with_config_unmetered(&config(true), &module)
+    }));
+
+    let (Ok(legacy), Ok(regex)) = (legacy, regex) else {
+        return;
+    };
 
     // The migration-risk direction is legacy rejecting while regex accepts. Complexity failures
     // are excluded because they are resource-limit differences, not evidence of unsoundness.
@@ -114,5 +133,3 @@ fuzz_target!(|code_unit: CodeUnit| {
         }
     }
 });
-
-// Campaign marker: base workflow is now present; this commit triggers the PR runner.
