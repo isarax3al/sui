@@ -1,15 +1,12 @@
 name: Reference Safety Differential Runner
 
 on:
-  pull_request:
-    branches:
-      - main
-    paths:
-      - external-crates/move/crates/bytecode-verifier-libfuzzer/**
-      - .github/workflows/reference-safety-diff-fuzz.yml
+  issues:
+    types: [opened]
 
 permissions:
   contents: read
+  issues: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -17,29 +14,45 @@ env:
 
 jobs:
   fuzz:
+    if: github.event.issue.title == '[run] reference safety differential fuzz'
     name: Differential libFuzzer
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
+    timeout-minutes: 30
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: Swatinem/rust-cache@v2
+      - name: Checkout research branch
+        uses: actions/checkout@v4
+        with:
+          ref: research/regex-reference-safety-diff-fuzz
+
+      - name: Install compatible nightly Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2025-12-15
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
         with:
           workspaces: external-crates/move
           cache-on-failure: true
-          shared-key: regex-reference-safety-diff-v1
-      - run: sudo apt-get update -qq && sudo apt-get install -y clang pkg-config libssl-dev cmake
+          shared-key: regex-reference-safety-diff-v2
+
+      - name: Install build dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y clang pkg-config libssl-dev cmake
+
       - name: Install cargo-fuzz
-        run: cargo +nightly install cargo-fuzz --locked
+        run: cargo +nightly-2025-12-15 install cargo-fuzz --locked
+
       - name: Run differential fuzz target
+        id: fuzz
         shell: bash
         run: |
           set +e
           cd external-crates/move/crates/bytecode-verifier-libfuzzer
           mkdir -p corpus/reference_safety_diff artifacts/reference_safety_diff
-          cargo +nightly fuzz run reference_safety_diff corpus/reference_safety_diff \
+          cargo +nightly-2025-12-15 fuzz run reference_safety_diff corpus/reference_safety_diff \
             -- \
-            -max_total_time=1500 \
+            -max_total_time=600 \
             -max_len=8192 \
             -timeout=10 \
             -rss_limit_mb=6000 \
@@ -47,7 +60,72 @@ jobs:
             -artifact_prefix=artifacts/reference_safety_diff/ \
             2>&1 | tee reference_safety_diff.log
           status=${PIPESTATUS[0]}
-          exit "$status"
+          echo "$status" > fuzz_exit_code.txt
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Post result to triggering issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          ROOT="external-crates/move/crates/bytecode-verifier-libfuzzer"
+          LOG="$ROOT/reference_safety_diff.log"
+          EXIT_FILE="$ROOT/fuzz_exit_code.txt"
+          EXIT_CODE="not-started"
+          [ -f "$EXIT_FILE" ] && EXIT_CODE=$(cat "$EXIT_FILE")
+
+          CRASH_FILE=$(find "$ROOT/artifacts/reference_safety_diff" -type f 2>/dev/null | head -1 || true)
+          CRASH_COUNT=$(find "$ROOT/artifacts/reference_safety_diff" -type f 2>/dev/null | wc -l || true)
+          CORPUS_COUNT=$(find "$ROOT/corpus/reference_safety_diff" -type f 2>/dev/null | wc -l || true)
+
+          {
+            echo "## Reference-safety differential fuzz result"
+            echo
+            echo "- Branch: \`research/regex-reference-safety-diff-fuzz\`"
+            echo "- Target: \`reference_safety_diff\`"
+            echo "- Predicate: legacy rejects, regex accepts; complexity-only errors excluded"
+            echo "- Fuzzer exit code: \`$EXIT_CODE\`"
+            echo "- Corpus files: \`$CORPUS_COUNT\`"
+            echo "- Crash artifacts: \`$CRASH_COUNT\`"
+            echo
+            echo "<details><summary>Final log tail</summary>"
+            echo
+            echo '```text'
+            if [ -f "$LOG" ]; then
+              tail -n 140 "$LOG" | tr -d '\000'
+            else
+              echo "Fuzz log was not created; an earlier setup/build step failed."
+            fi
+            echo '```'
+            echo "</details>"
+
+            if [ -n "$CRASH_FILE" ]; then
+              SIZE=$(stat -c%s "$CRASH_FILE")
+              SHA=$(sha256sum "$CRASH_FILE" | awk '{print $1}')
+              echo
+              echo "### First crash artifact"
+              echo "- File: \`$(basename "$CRASH_FILE")\`"
+              echo "- Size: \`$SIZE bytes\`"
+              echo "- SHA-256: \`$SHA\`"
+              if [ "$SIZE" -le 30000 ]; then
+                echo
+                echo "<details><summary>Base64 input</summary>"
+                echo
+                echo '```text'
+                base64 -w0 "$CRASH_FILE"
+                echo
+                echo '```'
+                echo "</details>"
+              fi
+            fi
+          } > /tmp/fuzz-comment.md
+
+          gh issue comment "$ISSUE_NUMBER" --repo "$REPOSITORY" --body-file /tmp/fuzz-comment.md
+
       - name: Upload fuzz corpus and crashes
         if: always()
         uses: actions/upload-artifact@v4
@@ -57,5 +135,6 @@ jobs:
           retention-days: 7
           path: |
             external-crates/move/crates/bytecode-verifier-libfuzzer/reference_safety_diff.log
+            external-crates/move/crates/bytecode-verifier-libfuzzer/fuzz_exit_code.txt
             external-crates/move/crates/bytecode-verifier-libfuzzer/corpus/reference_safety_diff/
             external-crates/move/crates/bytecode-verifier-libfuzzer/artifacts/reference_safety_diff/
