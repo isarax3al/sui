@@ -114,3 +114,5 @@ fuzz_target!(|code_unit: CodeUnit| {
         }
     }
 });
+
+// Campaign marker: base workflow is now present; this commit triggers the PR runner.
