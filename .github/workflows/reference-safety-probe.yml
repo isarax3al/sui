@@ -31,22 +31,27 @@ jobs:
         with:
           workspaces: external-crates/move
           cache-on-failure: true
-          shared-key: regex-reference-safety-probe-v1
+          shared-key: regex-reference-safety-probe-v2
 
       - name: Install build dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y clang pkg-config libssl-dev cmake
 
-      - name: Build and run deterministic probe
+      - name: Build and run deterministic probes
         id: probe
         shell: bash
         run: |
           set +e
-          cargo +nightly-2025-12-15 run \
-            --manifest-path external-crates/move/crates/bytecode-verifier-libfuzzer/Cargo.toml \
-            --bin reference_safety_probe \
+          MANIFEST=external-crates/move/crates/bytecode-verifier-libfuzzer/Cargo.toml
+          cargo +nightly-2025-12-15 run --manifest-path "$MANIFEST" --bin reference_safety_probe \
             2>&1 | tee /tmp/reference-safety-probe.log
-          status=${PIPESTATUS[0]}
-          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          verifier_status=${PIPESTATUS[0]}
+
+          cargo +nightly-2025-12-15 run --manifest-path "$MANIFEST" --bin runtime_alias_probe \
+            2>&1 | tee /tmp/runtime-alias-probe.log
+          runtime_status=${PIPESTATUS[0]}
+
+          cat /tmp/reference-safety-probe.log /tmp/runtime-alias-probe.log > /tmp/all-reference-probes.log
+          echo "exit_code=$((verifier_status != 0 || runtime_status != 0))" >> "$GITHUB_OUTPUT"
           exit 0
 
       - name: Post probe result
@@ -59,16 +64,16 @@ jobs:
         shell: bash
         run: |
           {
-            echo "## Reference-safety escalation probe"
+            echo "## Reference-safety escalation and runtime probe"
             echo
             echo "- Commit: \`$(git rev-parse HEAD)\`"
-            echo "- Exit code: \`${EXIT_CODE:-not-started}\`"
+            echo "- Combined exit code: \`${EXIT_CODE:-not-started}\`"
             echo
             echo '```text'
-            if grep -E '^(CASE=|error\[|error:|warning:)' /tmp/reference-safety-probe.log > /tmp/probe-summary.txt; then
+            if grep -E '^(CASE=|RUNTIME_CASE=|error\[|error:|warning:)' /tmp/all-reference-probes.log > /tmp/probe-summary.txt; then
               cat /tmp/probe-summary.txt
             else
-              tail -n 100 /tmp/reference-safety-probe.log
+              tail -n 120 /tmp/all-reference-probes.log
             fi
             echo '```'
           } > /tmp/probe-comment.md
