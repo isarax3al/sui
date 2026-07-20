@@ -17,6 +17,7 @@ move-bytecode-verifier-meter.workspace = true
 move-core-types = { workspace = true, features = ["fuzzing"] }
 move-binary-format = { workspace = true, features = ["fuzzing"] }
 move-vm-config.workspace = true
+move-vm-types-v3 = { path = "../../move-execution/v3/crates/move-vm-types" }
 
 # Prevent this from interfering with workspaces
 #[workspace]
