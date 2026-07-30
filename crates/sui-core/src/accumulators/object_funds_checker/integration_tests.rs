@@ -587,9 +587,10 @@ async fn fuzz_cross_boundary_conservation() {
                 .build();
             let cert = VerifiedExecutableTransaction::new_for_testing(tx, &env.keypair);
 
+            let kind = if vault_of(src).is_some() { "obj" } else { "addr" };
             let (eff, committed) = env.exec_any(cert).await;
             log.push(format!(
-                "src={src} total={total} force_fail={force_fail} committed={committed} outs={outs:?}"
+                "[{kind}] src={src} total={total} force_fail={force_fail} committed={committed} outs={outs:?}"
             ));
             effects.push(eff);
 
@@ -610,6 +611,7 @@ async fn fuzz_cross_boundary_conservation() {
         }
 
         // Settle the whole batch, then apply model deltas for the committed txns.
+        eprintln!("BATCH si={si} seed={seed:#x} committed ops:\n{log:#?}");
         env.authority
             .settle_accumulator_for_testing(&effects, None)
             .await;
