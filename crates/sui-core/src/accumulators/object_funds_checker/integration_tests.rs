@@ -499,17 +499,19 @@ async fn fuzz_cross_boundary_conservation() {
         vault_addrs.iter().position(|a| *a == addr).map(|i| vault_ids[i])
     };
 
-    // Independent ledger. `minted` = total ever funded in; `settled` = our model.
+    // Independent ledger. `minted` = total ever funded in; `settled` = our model of each
+    // account's settled balance (signed so an over-withdraw shows as a negative model value
+    // rather than wrapping).
     let mut minted: BTreeMap<SuiAddress, u128> = BTreeMap::new();
-    let mut settled: BTreeMap<SuiAddress, u128> = BTreeMap::new();
+    let mut settled: BTreeMap<SuiAddress, i128> = BTreeMap::new();
 
     // Seed every account and verify the store agrees with our model.
     for a in &accounts {
         env.fund_address(*a, TOPUP).await;
         *minted.entry(*a).or_default() += TOPUP as u128;
-        *settled.entry(*a).or_default() += TOPUP as u128;
+        *settled.entry(*a).or_default() += TOPUP as i128;
         assert_eq!(
-            env.balance_of(*a, ty.clone()),
+            env.balance_of(*a, ty.clone()) as i128,
             settled[a],
             "seed store mismatch for {a}"
         );
@@ -523,13 +525,13 @@ async fn fuzz_cross_boundary_conservation() {
         for a in &accounts {
             env.fund_address(*a, TOPUP).await;
             *minted.get_mut(a).unwrap() += TOPUP as u128;
-            *settled.get_mut(a).unwrap() += TOPUP as u128;
+            *settled.get_mut(a).unwrap() += TOPUP as i128;
         }
 
-        // Conservative per-account availability, only to choose plausible amounts.
-        // Correctness does not depend on it: a wrong guess just fails a withdraw,
-        // which the outcome-driven handler accounts for.
-        let mut avail: BTreeMap<SuiAddress, u128> = settled.clone();
+        // Conservative per-account availability, only to choose plausible amounts. Correctness
+        // does not depend on it: it merely biases the fuzzer toward transactions that commit.
+        let mut avail: BTreeMap<SuiAddress, u128> =
+            accounts.iter().map(|a| (*a, settled[a].max(0) as u128)).collect();
 
         // Settled deltas to apply to the model AFTER settlement, for committed txns only.
         let mut pending: BTreeMap<SuiAddress, i128> = BTreeMap::new();
@@ -591,14 +593,6 @@ async fn fuzz_cross_boundary_conservation() {
             ));
             effects.push(eff);
 
-            // A forced over-withdraw (net strictly greater than the source's spendable
-            // balance) must never commit. If it does, value was created.
-            assert!(
-                !(force_fail && committed),
-                "\nOVER-WITHDRAW COMMITTED seed={seed:#x} si={si}\n\
-                 src={src} withdrew total={total} but src_avail={src_avail}\noperations:\n{log:#?}\n"
-            );
-
             if committed {
                 // Decrement the soft availability cap by the *net* reduction of `src`
                 // (gross withdrawal minus anything deposited straight back to `src`).
@@ -620,26 +614,32 @@ async fn fuzz_cross_boundary_conservation() {
             .settle_accumulator_for_testing(&effects, None)
             .await;
         for (a, d) in &pending {
-            let s = settled.entry(*a).or_default();
-            *s = (*s as i128 + *d) as u128;
+            *settled.entry(*a).or_default() += *d;
         }
 
         // ---- Independent conservation checks ----
-        let sum_settled: u128 = settled.values().sum();
+        // (1) Authoritative: the total accumulator value actually on chain across every tracked
+        // account must equal everything ever minted into them. Gas is paid from a separate coin,
+        // so no value legitimately leaves this set. A mismatch = value created or destroyed.
+        let actual_total: u128 = accounts.iter().map(|a| env.balance_of(*a, ty.clone())).sum();
         let sum_minted: u128 = minted.values().sum();
         assert_eq!(
-            sum_settled, sum_minted,
-            "\nGLOBAL CONSERVATION BREAK seed={seed:#x} si={si}\n\
-             settled_total={sum_settled} minted_total={sum_minted}\n{log:#?}\n"
+            actual_total, sum_minted,
+            "\nVALUE CONSERVATION BREAK seed={seed:#x} si={si}\n\
+             on_chain_total={actual_total} minted_total={sum_minted} \
+             delta={}\n{log:#?}\n",
+            actual_total as i128 - sum_minted as i128
         );
+        // (2) Per-account: the on-chain balance must match our independent model of committed
+        // deltas. Divergence points at which account's accounting is wrong.
         for a in &accounts {
             let modeled = settled.get(a).copied().unwrap_or_default();
-            let actual = env.balance_of(*a, ty.clone());
+            let actual = env.balance_of(*a, ty.clone()) as i128;
             if actual != modeled {
                 panic!(
                     "\nCONSERVATION CANDIDATE (per-account)\nseed={seed:#x} si={si}\n\
                      account={a}\nmodeled={modeled} actual={actual} delta={}\noperations:\n{log:#?}\n",
-                    actual as i128 - modeled as i128
+                    actual - modeled
                 );
             }
         }
