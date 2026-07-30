@@ -14,7 +14,7 @@ use sui_types::{
     balance::Balance,
     base_types::{ObjectID, ObjectRef, SuiAddress},
     crypto::get_account_key_pair,
-    effects::TransactionEffectsAPI,
+    effects::{TransactionEffects, TransactionEffectsAPI},
     executable_transaction::VerifiedExecutableTransaction,
     execution::ExecutionOutput,
     execution_status::{ExecutionErrorKind, ExecutionFailure, ExecutionStatus},
@@ -134,6 +134,63 @@ impl TestEnv {
         let balance_read = self.authority.get_account_funds_read();
         let (balance, _version) = balance_read.get_latest_account_amount(&account_id);
         balance
+    }
+
+    // ---- helpers used by fuzz_cross_boundary_conservation ----
+
+    /// Create an additional owned object-balance vault, returning its id.
+    async fn new_vault(&self) -> ObjectID {
+        let gas = self.oref(&self.gas_obj).await;
+        let tx = TestTransactionBuilder::new(self.sender, gas, self.rgp())
+            .move_call(self.package_id, "object_balance", "new_owned", vec![])
+            .build();
+        let cert = VerifiedExecutableTransaction::new_for_testing(tx, &self.keypair);
+        let (effects, ..) = self
+            .authority
+            .try_execute_immediately(&cert, ExecutionEnv::new(), &self.epoch_store)
+            .await
+            .unwrap();
+        assert!(effects.status().is_ok());
+        effects.created().into_iter().next().unwrap().0.0
+    }
+
+    /// Read any account's settled balance for a given type, independent of the checker.
+    fn balance_of(&self, owner: SuiAddress, type_tag: TypeTag) -> u128 {
+        let account_id =
+            AccumulatorValue::get_field_id(owner, &Balance::type_tag(type_tag)).unwrap();
+        self.authority
+            .get_account_funds_read()
+            .get_latest_account_amount(&account_id)
+            .0
+    }
+
+    /// Execute a transaction that touches the accumulator, driving it to completion whether it
+    /// takes the fast path or is deferred to consensus (`RetryLater`). Returns the effects and
+    /// whether the transaction actually committed its balance changes (status ok).
+    async fn exec_any(&self, cert: VerifiedExecutableTransaction) -> (TransactionEffects, bool) {
+        let digest = *cert.digest();
+        let accumulator_version = self.oref(&SUI_ACCUMULATOR_ROOT_OBJECT_ID).await.1;
+        let output = self
+            .authority
+            .try_execute_immediately(
+                &cert,
+                ExecutionEnv::new()
+                    .with_assigned_versions(AssignedVersions::new(vec![], Some(accumulator_version))),
+                &self.epoch_store,
+            )
+            .await;
+        let effects = match output {
+            ExecutionOutput::Success(t) => t.0,
+            ExecutionOutput::RetryLater => {
+                self.authority
+                    .notify_read_effects_for_testing("fuzz", digest)
+                    .await
+            }
+            ExecutionOutput::EpochEnded => panic!("unexpected EpochEnded during fuzz execution"),
+            ExecutionOutput::Fatal(e) => panic!("fatal execution error during fuzz: {e:?}"),
+        };
+        let committed = effects.status().is_ok();
+        (effects, committed)
     }
 }
 
@@ -396,4 +453,174 @@ async fn test_object_withdraw_and_deposit_same_transaction() {
             ..
         })
     ));
+}
+
+// ============================================================================
+// Cross-boundary accumulator conservation fuzzer.
+//
+// Independent oracle: we maintain our own model of every account's settled
+// balance, derived only from the balance *deltas of transactions that actually
+// committed*. After each batch is settled, the on-chain settled store MUST
+// equal our model for every account, and the global sum must equal everything
+// ever minted. Any divergence means value was created or destroyed across the
+// object-fund / address-fund / deposit boundaries = a conservation break.
+//
+// The harness is outcome-driven: it never predicts whether the checker will
+// accept a withdraw. It executes, observes the real result, and only applies a
+// balance delta to the model when the transaction committed. That keeps a
+// mispredicted accept/reject from masquerading as a conservation finding.
+//
+//   cargo nextest run -p sui-core fuzz_cross_boundary_conservation \
+//     --run-ignored all --no-capture
+// ============================================================================
+#[tokio::test]
+#[ignore = "cross-boundary accumulator conservation fuzzer (long, deterministic)"]
+async fn fuzz_cross_boundary_conservation() {
+    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use std::collections::BTreeMap;
+
+    const BASE_SEED: u64 = 0xF00D_5417_C0FF_EE01;
+    const SEQUENCES: usize = 48;
+    const TOPUP: u64 = 100_000;
+    const MAXTX: u64 = 8_000;
+
+    telemetry_subscribers::init_for_testing();
+    let env = TestEnv::new().await;
+    let ty = GAS::type_tag();
+
+    // Three owned object vaults + the sender's address account.
+    let vault_ids = vec![env.vault_obj, env.new_vault().await, env.new_vault().await];
+    let vault_addrs: Vec<SuiAddress> = vault_ids.iter().copied().map(SuiAddress::from).collect();
+    let mut accounts = vec![env.sender];
+    accounts.extend(vault_addrs.iter().copied());
+
+    // Map an account address back to its owning vault object id (for object funds).
+    let vault_of = |addr: SuiAddress| -> Option<ObjectID> {
+        vault_addrs.iter().position(|a| *a == addr).map(|i| vault_ids[i])
+    };
+
+    // Independent ledger. `minted` = total ever funded in; `settled` = our model.
+    let mut minted: BTreeMap<SuiAddress, u128> = BTreeMap::new();
+    let mut settled: BTreeMap<SuiAddress, u128> = BTreeMap::new();
+
+    // Seed every account and verify the store agrees with our model.
+    for a in &accounts {
+        env.fund_address(*a, TOPUP).await;
+        *minted.entry(*a).or_default() += TOPUP as u128;
+        *settled.entry(*a).or_default() += TOPUP as u128;
+        assert_eq!(
+            env.balance_of(*a, ty.clone()),
+            settled[a],
+            "seed store mismatch for {a}"
+        );
+    }
+
+    for si in 0..SEQUENCES {
+        let seed = BASE_SEED ^ (si as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let mut rng = StdRng::seed_from_u64(seed);
+
+        // Top up every account before the batch (settles immediately).
+        for a in &accounts {
+            env.fund_address(*a, TOPUP).await;
+            *minted.get_mut(a).unwrap() += TOPUP as u128;
+            *settled.get_mut(a).unwrap() += TOPUP as u128;
+        }
+
+        // Conservative per-account availability, only to choose plausible amounts.
+        // Correctness does not depend on it: a wrong guess just fails a withdraw,
+        // which the outcome-driven handler accounts for.
+        let mut avail: BTreeMap<SuiAddress, u128> = settled.clone();
+
+        // Settled deltas to apply to the model AFTER settlement, for committed txns only.
+        let mut pending: BTreeMap<SuiAddress, i128> = BTreeMap::new();
+        let mut effects = Vec::new();
+        let mut log: Vec<String> = Vec::new();
+
+        let ntx = rng.gen_range(3..=8);
+        for _ in 0..ntx {
+            // Pick a source account with something to spend.
+            let src = accounts[rng.gen_range(0..accounts.len())];
+            let src_avail = *avail.get(&src).unwrap_or(&0);
+            if src_avail == 0 {
+                continue;
+            }
+
+            // 20% of the time deliberately over-withdraw to exercise the failure path.
+            let force_fail = rng.gen_ratio(1, 5);
+            let total: u64 = if force_fail {
+                u64::try_from(src_avail).unwrap_or(u64::MAX).saturating_add(rng.gen_range(1..=64))
+            } else {
+                let cap = u64::try_from(src_avail.min(MAXTX as u128)).unwrap();
+                rng.gen_range(1..=cap)
+            };
+
+            // Split `total` across 1..=3 destination accounts.
+            let n = rng.gen_range(1..=3);
+            let mut rem = total;
+            let mut outs: Vec<(u64, SuiAddress)> = Vec::new();
+            for i in 0..n {
+                let a = if i + 1 == n { rem } else { rng.gen_range(0..=rem) };
+                rem -= a;
+                let dst = accounts[rng.gen_range(0..accounts.len())];
+                outs.push((a, dst));
+            }
+
+            let gas = env.oref(&env.gas_obj).await;
+            let fund_source = match vault_of(src) {
+                Some(vault_id) => {
+                    FundSource::object_fund_owned(env.package_id, env.oref(&vault_id).await)
+                }
+                None => FundSource::address_fund_with_reservation(total),
+            };
+            let tx = TestTransactionBuilder::new(env.sender, gas, env.rgp())
+                .transfer_sui_to_address_balance(fund_source, outs.clone())
+                .build();
+            let cert = VerifiedExecutableTransaction::new_for_testing(tx, &env.keypair);
+
+            let (eff, committed) = env.exec_any(cert).await;
+            log.push(format!(
+                "src={src} total={total} force_fail={force_fail} committed={committed} outs={outs:?}"
+            ));
+            effects.push(eff);
+
+            if committed {
+                *avail.get_mut(&src).unwrap() -= total as u128;
+                *pending.entry(src).or_default() -= total as i128;
+                for (a, dst) in &outs {
+                    *pending.entry(*dst).or_default() += *a as i128;
+                }
+            }
+        }
+
+        // Settle the whole batch, then apply model deltas for the committed txns.
+        env.authority
+            .settle_accumulator_for_testing(&effects, None)
+            .await;
+        for (a, d) in &pending {
+            let s = settled.entry(*a).or_default();
+            *s = (*s as i128 + *d) as u128;
+        }
+
+        // ---- Independent conservation checks ----
+        let sum_settled: u128 = settled.values().sum();
+        let sum_minted: u128 = minted.values().sum();
+        assert_eq!(
+            sum_settled, sum_minted,
+            "\nGLOBAL CONSERVATION BREAK seed={seed:#x} si={si}\n\
+             settled_total={sum_settled} minted_total={sum_minted}\n{log:#?}\n"
+        );
+        for a in &accounts {
+            let modeled = settled.get(a).copied().unwrap_or_default();
+            let actual = env.balance_of(*a, ty.clone());
+            if actual != modeled {
+                panic!(
+                    "\nCONSERVATION CANDIDATE (per-account)\nseed={seed:#x} si={si}\n\
+                     account={a}\nmodeled={modeled} actual={actual} delta={}\noperations:\n{log:#?}\n",
+                    actual as i128 - modeled as i128
+                );
+            }
+        }
+    }
+
+    eprintln!("fuzz_cross_boundary_conservation: {SEQUENCES} sequences, no conservation break");
 }
