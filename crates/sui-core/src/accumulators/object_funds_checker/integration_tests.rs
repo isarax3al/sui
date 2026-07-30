@@ -613,7 +613,6 @@ async fn fuzz_cross_boundary_conservation() {
         }
 
         // Settle the whole batch, then apply model deltas for the committed txns.
-        eprintln!("BATCH si={si} seed={seed:#x} committed ops:\n{log:#?}");
         env.authority
             .settle_accumulator_for_testing(&effects, None)
             .await;
