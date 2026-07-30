@@ -545,25 +545,33 @@ async fn fuzz_cross_boundary_conservation() {
                 continue;
             }
 
-            // 20% of the time deliberately over-withdraw to exercise the failure path.
+            // A non-source account to receive funds (so a deposit back to `src` never
+            // masks an over-withdraw when we are trying to force a failure).
+            let other = *accounts.iter().find(|a| **a != src).unwrap();
+
+            // 20% of the time deliberately over-withdraw the whole balance plus a bit,
+            // sending only to `other` so the net withdrawal strictly exceeds `src_avail`.
             let force_fail = rng.gen_ratio(1, 5);
-            let total: u64 = if force_fail {
-                u64::try_from(src_avail).unwrap_or(u64::MAX).saturating_add(rng.gen_range(1..=64))
+            let outs: Vec<(u64, SuiAddress)> = if force_fail {
+                let total = u64::try_from(src_avail)
+                    .unwrap_or(u64::MAX)
+                    .saturating_add(rng.gen_range(1..=64));
+                vec![(total, other)]
             } else {
                 let cap = u64::try_from(src_avail.min(MAXTX as u128)).unwrap();
-                rng.gen_range(1..=cap)
+                let total = rng.gen_range(1..=cap);
+                // Split `total` across 1..=3 destination accounts (may deposit back to src).
+                let n = rng.gen_range(1..=3);
+                let mut rem = total;
+                let mut v = Vec::new();
+                for i in 0..n {
+                    let a = if i + 1 == n { rem } else { rng.gen_range(0..=rem) };
+                    rem -= a;
+                    v.push((a, accounts[rng.gen_range(0..accounts.len())]));
+                }
+                v
             };
-
-            // Split `total` across 1..=3 destination accounts.
-            let n = rng.gen_range(1..=3);
-            let mut rem = total;
-            let mut outs: Vec<(u64, SuiAddress)> = Vec::new();
-            for i in 0..n {
-                let a = if i + 1 == n { rem } else { rng.gen_range(0..=rem) };
-                rem -= a;
-                let dst = accounts[rng.gen_range(0..accounts.len())];
-                outs.push((a, dst));
-            }
+            let total: u64 = outs.iter().map(|(a, _)| *a).sum();
 
             let gas = env.oref(&env.gas_obj).await;
             let fund_source = match vault_of(src) {
@@ -583,8 +591,23 @@ async fn fuzz_cross_boundary_conservation() {
             ));
             effects.push(eff);
 
+            // A forced over-withdraw (net strictly greater than the source's spendable
+            // balance) must never commit. If it does, value was created.
+            assert!(
+                !(force_fail && committed),
+                "\nOVER-WITHDRAW COMMITTED seed={seed:#x} si={si}\n\
+                 src={src} withdrew total={total} but src_avail={src_avail}\noperations:\n{log:#?}\n"
+            );
+
             if committed {
-                *avail.get_mut(&src).unwrap() -= total as u128;
+                // Decrement the soft availability cap by the *net* reduction of `src`
+                // (gross withdrawal minus anything deposited straight back to `src`).
+                let back_to_src: u128 =
+                    outs.iter().filter(|(_, d)| *d == src).map(|(a, _)| *a as u128).sum();
+                let net_src = (total as u128).saturating_sub(back_to_src);
+                let slot = avail.entry(src).or_default();
+                *slot = slot.saturating_sub(net_src);
+
                 *pending.entry(src).or_default() -= total as i128;
                 for (a, dst) in &outs {
                     *pending.entry(*dst).or_default() += *a as i128;
