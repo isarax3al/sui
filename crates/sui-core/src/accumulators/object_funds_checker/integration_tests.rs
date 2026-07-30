@@ -540,8 +540,10 @@ async fn fuzz_cross_boundary_conservation() {
 
         let ntx = rng.gen_range(3..=8);
         for _ in 0..ntx {
-            // Pick a source account with something to spend.
-            let src = accounts[rng.gen_range(0..accounts.len())];
+            // Pick an object-vault source with something to spend. (Address-fund withdrawals
+            // are validated at signing / consensus scheduling, a path this fast-path harness
+            // bypasses, so restrict sources to object vaults whose limits are enforced here.)
+            let src = vault_addrs[rng.gen_range(0..vault_addrs.len())];
             let src_avail = *avail.get(&src).unwrap_or(&0);
             if src_avail == 0 {
                 continue;
