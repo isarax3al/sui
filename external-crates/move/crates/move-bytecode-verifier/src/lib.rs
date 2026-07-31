@@ -42,6 +42,7 @@ pub use verifier::{
 };
 
 mod acquires_list_verifier;
+mod fuzz_mutation_tests;
 mod locals_safety;
 mod reference_safety;
 pub mod regex_reference_safety;
