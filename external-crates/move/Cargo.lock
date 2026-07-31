@@ -2193,6 +2193,7 @@ dependencies = [
 name = "move-bytecode-verifier"
 version = "0.1.0"
 dependencies = [
+ "arbitrary",
  "hex-literal",
  "move-abstract-interpreter",
  "move-abstract-stack",
