@@ -117,7 +117,12 @@ fn exercise(bytes: &[u8], config: &VerifierConfig) -> Option<&'static str> {
     None
 }
 
+/// Long-running fuzz campaign; run explicitly, preferably with `--release`
+/// (`cargo test --release ... fuzz_deserialize_verify_no_panic -- --ignored`).
+/// Release mode matches mainnet semantics: debug-only `safe_assert!`/`debug_assert!`
+/// panics become `Err`, so a panic under `--release` is a real remote-crash candidate.
 #[test]
+#[ignore = "long fuzz campaign; run with --release"]
 fn fuzz_deserialize_verify_no_panic() {
     const ITERATIONS: usize = 300_000;
     let config = VerifierConfig::default();
