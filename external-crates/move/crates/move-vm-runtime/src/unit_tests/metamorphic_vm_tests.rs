@@ -125,7 +125,57 @@ module 0x2b::N {
 }
 "#;
 
-const SEEDS: &[(&str, &str)] = &[("branches", SEED_SRC_BRANCHES), ("enum", SEED_SRC_ENUM)];
+/// Deeply-nested control flow: nested loops with a three-way branch inside.
+/// Maximizes the number of branch targets the Nop/Branch sweeps must renumber.
+const SEED_SRC_NESTED: &str = r#"
+module 0x2c::D {
+    public fun run() {
+        let mut acc: u64 = 0;
+        let mut a: u64 = 0;
+        while (a < 4) {
+            let mut b: u64 = 0;
+            while (b < 4) {
+                if (a > b) {
+                    if (a % 2 == 0) { acc = acc + a } else { acc = acc + b }
+                } else if (a < b) {
+                    acc = acc + (b - a)
+                } else {
+                    acc = acc + 1
+                };
+                b = b + 1;
+            };
+            a = a + 1;
+        };
+        assert!(acc == 21, 1);
+    }
+}
+"#;
+
+/// Reference-heavy: `&mut` passed to a helper, field borrows, read-refs.
+const SEED_SRC_REFS: &str = r#"
+module 0x2d::R {
+    public struct P has drop { a: u64, b: u64 }
+
+    fun bump(r: &mut u64, d: u64) { *r = *r + d; }
+
+    public fun run() {
+        let mut p = P { a: 10, b: 20 };
+        bump(&mut p.a, 5);
+        assert!(p.a == 15, 1);
+        let x = *(&p.a);
+        bump(&mut p.b, x);
+        assert!(p.b == 35, 2);
+        assert!(*(&p.a) + *(&p.b) == 50, 3);
+    }
+}
+"#;
+
+const SEEDS: &[(&str, &str)] = &[
+    ("branches", SEED_SRC_BRANCHES),
+    ("enum", SEED_SRC_ENUM),
+    ("nested", SEED_SRC_NESTED),
+    ("refs", SEED_SRC_REFS),
+];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Outcome {
@@ -215,6 +265,41 @@ fn insert_nop(module: &mut CompiledModule, run_idx: usize, p: usize) -> bool {
         }
     }
     code_unit.code.insert(p, Bytecode::Nop);
+    true
+}
+
+/// Insert an unconditional `Branch` to the immediately-following instruction at
+/// offset `p` (semantically a fall-through, so behavior is unchanged), fixing up
+/// every other branch/jump-table target `>= p`. Unlike a `Nop`, this splits the
+/// basic block at `p`, exercising the JIT's block-boundary detection + edge
+/// wiring, not just linear renumbering. Skips `p` at/after the last instruction
+/// (a branch past the end would be invalid rather than a fall-through).
+fn insert_branch_to_next(module: &mut CompiledModule, run_idx: usize, p: usize) -> bool {
+    use move_binary_format::file_format::JumpTableInner;
+    let code_unit = module.function_defs[run_idx].code.as_mut().unwrap();
+    if p >= code_unit.code.len() {
+        return false;
+    }
+    for jt in code_unit.jump_tables.iter_mut() {
+        let JumpTableInner::Full(offsets) = &mut jt.jump_table;
+        for t in offsets.iter_mut() {
+            if (*t as usize) >= p {
+                *t += 1;
+            }
+        }
+    }
+    for instr in code_unit.code.iter_mut() {
+        match instr {
+            Bytecode::BrTrue(t) | Bytecode::BrFalse(t) | Bytecode::Branch(t) => {
+                if (*t as usize) >= p {
+                    *t += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    // Branch to p+1 == the original instruction at p (now shifted to p+1).
+    code_unit.code.insert(p, Bytecode::Branch((p + 1) as u16));
     true
 }
 
@@ -317,7 +402,26 @@ fn metamorphic_execute_equivalence() {
             }
         }
 
-        // Transform 3: unused trailing locals (a range of counts).
+        // Transform 3: unconditional Branch-to-next at every offset (splits the
+        // basic block, exercising block-boundary detection + edge wiring).
+        for p in 0..orig_len {
+            let mut m = seed.clone();
+            if !insert_branch_to_next(&mut m, run_idx, p) {
+                continue;
+            }
+            match panic::catch_unwind(AssertUnwindSafe(|| run_module(m))) {
+                Ok(Outcome::ExecOk) => ok += 1,
+                Ok(Outcome::LoadRejected) => rejected += 1,
+                Ok(Outcome::ExecErr) => {
+                    findings.push(format!("[{seed_name}] Branch->next@{p}: preserving -> ExecErr"));
+                }
+                Err(_) => {
+                    findings.push(format!("[{seed_name}] Branch->next@{p}: preserving -> PANIC"));
+                }
+            }
+        }
+
+        // Transform 4: unused trailing locals (a range of counts).
         for n in [1usize, 2, 4, 8, 32, 200] {
             let mut m = seed.clone();
             append_unused_locals(&mut m, run_idx, n);
