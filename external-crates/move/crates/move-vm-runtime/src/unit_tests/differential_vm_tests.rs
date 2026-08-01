@@ -687,9 +687,38 @@ fn locate_run_def(modules: &[CompiledModule]) -> (usize, usize) {
     panic!("seed has no run()")
 }
 
-/// Apply one arbitrary edit to `run`'s instruction stream (no offset fixup: we
-/// are not preserving semantics, only producing a mutant both VMs must agree on
-/// or reject).
+/// Perturb the *operand* of an operand-bearing instruction (index / constant /
+/// branch target), keeping the opcode. Such mutants pass verification far more
+/// often than a fully-random replacement, so they reach execution on both VMs
+/// much more frequently -- which is where a divergence would surface. Returns
+/// None for opcodes with no simple scalar operand.
+fn perturb(instr: &Bytecode, rng: &mut Rng) -> Option<Bytecode> {
+    use Bytecode::*;
+    let d = rng.next_u64();
+    let small = (d % 8) as u8;
+    let soff = (d % 8) as u16;
+    Some(match instr {
+        LdU8(v) => LdU8(v.wrapping_add(d as u8)),
+        LdU16(v) => LdU16(v.wrapping_add(d as u16)),
+        LdU32(v) => LdU32(v.wrapping_add(d as u32)),
+        LdU64(v) => LdU64(v.wrapping_add(d)),
+        LdU128(v) => LdU128(Box::new(v.wrapping_add(d as u128))),
+        CopyLoc(i) => CopyLoc(i.wrapping_add(small)),
+        MoveLoc(i) => MoveLoc(i.wrapping_add(small)),
+        StLoc(i) => StLoc(i.wrapping_add(small)),
+        MutBorrowLoc(i) => MutBorrowLoc(i.wrapping_add(small)),
+        ImmBorrowLoc(i) => ImmBorrowLoc(i.wrapping_add(small)),
+        BrTrue(o) => BrTrue(o.wrapping_add(soff)),
+        BrFalse(o) => BrFalse(o.wrapping_add(soff)),
+        Branch(o) => Branch(o.wrapping_add(soff)),
+        _ => return None,
+    })
+}
+
+/// Apply one edit to `run`'s instruction stream. Not semantics-preserving: we
+/// only need a mutant both VMs must agree on (or reject). Modes 0-3 are
+/// structural (random replace / insert / delete / swap); modes 4-6 perturb an
+/// existing operand -- biased toward the higher-execution-yield perturbations.
 fn mutate(module: &mut CompiledModule, di: usize, u: &mut Unstructured, rng: &mut Rng) {
     let Some(cu) = module.function_defs[di].code.as_mut() else {
         return;
@@ -699,7 +728,7 @@ fn mutate(module: &mut CompiledModule, di: usize, u: &mut Unstructured, rng: &mu
     }
     let len = cu.code.len();
     let at = (rng.next_u64() as usize) % len;
-    match rng.next_u64() % 4 {
+    match rng.next_u64() % 7 {
         0 => {
             if let Ok(instr) = Bytecode::arbitrary(u) {
                 cu.code[at] = instr;
@@ -713,9 +742,20 @@ fn mutate(module: &mut CompiledModule, di: usize, u: &mut Unstructured, rng: &mu
         2 => {
             cu.code.remove(at);
         }
-        _ => {
+        3 => {
             let b = (rng.next_u64() as usize) % len;
             cu.code.swap(at, b);
+        }
+        // Modes 4-6: operand perturbation (higher execution yield). If the
+        // chosen instruction has no scalar operand, fall back to a swap so the
+        // iteration is not wasted.
+        _ => {
+            if let Some(new_instr) = perturb(&cu.code[at], rng) {
+                cu.code[at] = new_instr;
+            } else {
+                let b = (rng.next_u64() as usize) % len;
+                cu.code.swap(at, b);
+            }
         }
     }
 }
