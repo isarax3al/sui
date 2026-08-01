@@ -529,6 +529,43 @@ module 0x47::DG {
 }
 "#,
     ),
+    (
+        // Unit-only enums + enums mixing unit and field variants, then nested,
+        // to exercise the type-depth computation path (calculate_depth_of_datatype
+        // / DepthFormula) on variants -- the area the program's own example title
+        // points at ("DepthFormula::add() no-op on unit-variant enums").
+        "typedepth_units",
+        r#"
+module 0x50::TU {
+    public enum U0 has drop { A, B, C }
+    public enum U1 has drop { A, B(U0), C }
+    public enum U2 has drop { A(U1), B, C(U0, U1) }
+    public struct S has drop { a: U0, b: U1, c: U2 }
+    public fun run(): u64 {
+        let _s = S { a: U0::A, b: U1::A, c: U2::B };
+        let x = match (&_s.b) { U1::A => 1u64, U1::B(_) => 2, U1::C => 3 };
+        let y = match (&_s.c) { U2::A(_) => 10u64, U2::B => 20, U2::C(_, _) => 30 };
+        x + y
+    }
+}
+"#,
+    ),
+    (
+        // Deeply-nested generic instantiation to stress DepthFormula::subst /
+        // solve near the type-depth boundary.
+        "typedepth_nested",
+        r#"
+module 0x51::TN {
+    public struct B<T> has drop { v: T }
+    public enum E<T> has drop { Leaf, Node(T) }
+    public fun run(): u64 {
+        let _x: E<B<B<B<B<B<u64>>>>>> = E::Leaf;
+        let _y: B<E<B<E<B<u64>>>>> = B { v: E::Node(B { v: E::Node(B { v: 7 }) }) };
+        match (&_x) { E::Leaf => 1u64, E::Node(_) => 2 }
+    }
+}
+"#,
+    ),
 ];
 
 #[derive(Clone, PartialEq, Eq, Debug)]
