@@ -482,6 +482,53 @@ module 0x44::Caller {
 }
 "#,
     ),
+    (
+        "vector",
+        r#"
+module 0x45::Vec {
+    public fun run(): vector<u64> {
+        vector[1u64, 2u64, 3u64, 100u64, 42u64]
+    }
+}
+"#,
+    ),
+    (
+        "enum",
+        r#"
+module 0x46::En {
+    public enum E has drop { A, B(u64), C(u64, u64) }
+    public fun run(): u64 {
+        let mut total: u64 = 0;
+        let mut i: u64 = 0;
+        while (i < 6) {
+            let e = if (i % 3 == 0) { E::A } else if (i % 3 == 1) { E::B(i) } else { E::C(i, i + 1) };
+            let add = match (e) { E::A => 1, E::B(x) => x * 10, E::C(x, y) => x + y };
+            total = total + add;
+            i = i + 1;
+        };
+        total
+    }
+}
+"#,
+    ),
+    (
+        "deepgen",
+        r#"
+module 0x47::DG {
+    public struct Box<T> has drop { v: T }
+    public struct Pair<A, B> has drop { a: A, b: B }
+    fun mk<T>(t: T): Box<T> { Box { v: t } }
+    public fun run(): u64 {
+        let b = mk<Box<u64>>(mk<u64>(7));
+        let Box { v: inner } = b;
+        let Box { v } = inner;
+        let p = Pair<u64, bool> { a: v * 3, b: true };
+        let Pair { a, b: _ } = p;
+        a
+    }
+}
+"#,
+    ),
 ];
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -676,7 +723,7 @@ fn mutate(module: &mut CompiledModule, di: usize, u: &mut Unstructured, rng: &mu
 #[test]
 #[ignore = "long fuzz campaign; run with --release --features \"fuzzing testing\""]
 fn differential_fuzz_new_vs_old() {
-    const ITERS_PER_SEED: usize = 30_000;
+    const ITERS_PER_SEED: usize = 100_000;
     let mut rng = Rng(0xD1FF_0FF5_1234_9999);
 
     let prev = std::panic::take_hook();
