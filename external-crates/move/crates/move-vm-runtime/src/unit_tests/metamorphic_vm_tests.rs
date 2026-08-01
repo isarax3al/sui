@@ -177,11 +177,84 @@ module 0x2d::R {
 }
 "#;
 
+/// Operation-coverage seed: every integer width, checked casts up and down,
+/// bit ops, shifts, u128/u256 arithmetic, all comparisons, and boolean logic,
+/// each self-checked against a known constant. A JIT mistranslation of any
+/// single operation trips its assert (so the baseline itself fails), and the
+/// metamorphic sweeps additionally reshape code containing all of these ops.
+const SEED_SRC_OPS: &str = r#"
+module 0x2e::Ops {
+    public fun run(): u64 {
+        // bit ops (u64)
+        assert!((0xF0u64 & 0x0Fu64) == 0, 1);
+        assert!((0xF0u64 | 0x0Fu64) == 255, 2);
+        assert!((0xFFu64 ^ 0x0Fu64) == 240, 3);
+        assert!((1u64 << 10) == 1024, 4);
+        assert!((1024u64 >> 3) == 128, 5);
+
+        // arithmetic (u64)
+        assert!((7u64 / 2) == 3, 6);
+        assert!((7u64 % 2) == 1, 7);
+        assert!((6u64 * 7) == 42, 8);
+        assert!((100u64 - 58) == 42, 9);
+
+        // comparisons
+        assert!(3u64 < 4, 10);
+        assert!(4u64 > 3, 11);
+        assert!(4u64 <= 4, 12);
+        assert!(4u64 >= 4, 13);
+        assert!(5u64 == 5, 14);
+        assert!(5u64 != 6, 15);
+
+        // bool logic
+        assert!(true && true, 16);
+        assert!(true || false, 17);
+        assert!(!false, 18);
+
+        // casts up
+        let a: u8 = 250;
+        assert!((a as u16) == 250, 19);
+        assert!((a as u32) == 250, 20);
+        assert!((a as u64) == 250, 21);
+        assert!((a as u128) == 250, 22);
+        assert!((a as u256) == 250, 23);
+        // casts down (values in range)
+        assert!((250u256 as u8) == 250, 24);
+        assert!((65535u64 as u16) == 65535, 25);
+
+        // u128 arithmetic
+        let big: u128 = 1000000000000u128 * 1000000u128; // 1e18
+        assert!(big == 1000000000000000000, 26);
+        assert!(big / 1000000u128 == 1000000000000, 27);
+
+        // u256 shifts and arithmetic
+        let s: u256 = 1u256 << 200;
+        assert!(s >> 200 == 1, 28);
+        assert!(s / (1u256 << 100) == (1u256 << 100), 29);
+        let m: u256 = (1u256 << 128) + 12345;
+        assert!(m % (1u256 << 128) == 12345, 30);
+
+        // u16 / u32 arithmetic (near width limits)
+        assert!((60000u16 + 5000u16) == 65000, 31);
+        assert!((3000000000u32 + 1000000000u32) == 4000000000, 32);
+        assert!((4000000000u32 - 3999999999u32) == 1, 33);
+
+        let mut acc: u64 = 0;
+        acc = acc + (0xFFu64 | 0x100u64);                     // 511
+        acc = acc + (1u64 << 5);                              // 32
+        acc = acc + ((big / 1000000000000000u128) as u64);    // 1000
+        assert!(acc == 1543, 34);
+        acc
+    }
+}
+"#;
+
 const SEEDS: &[(&str, &str)] = &[
     ("branches", SEED_SRC_BRANCHES),
     ("enum", SEED_SRC_ENUM),
     ("nested", SEED_SRC_NESTED),
     ("refs", SEED_SRC_REFS),
+    ("ops", SEED_SRC_OPS),
 ];
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -409,19 +482,23 @@ fn metamorphic_execute_equivalence() {
 
         // Transform 2: two-Nop insertions at every pair of offsets (compounds
         // the renumbering so a single-insert-safe off-by-one can still surface).
-        for a in 0..=orig_len {
-            for b in 0..=orig_len {
-                let mut m = seed.clone();
-                if !insert_nop(&mut m, run_idx, a) {
-                    continue;
+        // O(n^2), so only for the shorter seeds; long seeds rely on the linear
+        // single-Nop / Branch sweeps plus the baseline op-correctness check.
+        if orig_len <= 130 {
+            for a in 0..=orig_len {
+                for b in 0..=orig_len {
+                    let mut m = seed.clone();
+                    if !insert_nop(&mut m, run_idx, a) {
+                        continue;
+                    }
+                    // second insert shifts by the first; insert at b adjusted.
+                    let b2 = if b >= a { b + 1 } else { b };
+                    if !insert_nop(&mut m, run_idx, b2) {
+                        continue;
+                    }
+                    let res = panic::catch_unwind(AssertUnwindSafe(|| run_module(m)));
+                    classify(res, format!("[{seed_name}] Nop@{a},{b2}"));
                 }
-                // second insert shifts by the first; insert at b adjusted.
-                let b2 = if b >= a { b + 1 } else { b };
-                if !insert_nop(&mut m, run_idx, b2) {
-                    continue;
-                }
-                let res = panic::catch_unwind(AssertUnwindSafe(|| run_module(m)));
-                classify(res, format!("[{seed_name}] Nop@{a},{b2}"));
             }
         }
 
