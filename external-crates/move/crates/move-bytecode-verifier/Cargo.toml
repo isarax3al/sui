@@ -24,6 +24,8 @@ move-regex-borrow-graph.workspace = true
 
 [dev-dependencies]
 hex-literal.workspace = true
+arbitrary.workspace = true
+move-binary-format = { workspace = true, features = ["fuzzing"] }
 
 [features]
 default = []

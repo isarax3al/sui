@@ -2193,6 +2193,7 @@ dependencies = [
 name = "move-bytecode-verifier"
 version = "0.1.0"
 dependencies = [
+ "arbitrary",
  "hex-literal",
  "move-abstract-interpreter",
  "move-abstract-stack",
@@ -3034,6 +3035,7 @@ name = "move-vm-runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arbitrary",
  "bcs",
  "better_any",
  "bumpalo",
@@ -3057,6 +3059,8 @@ dependencies = [
  "move-trace-format",
  "move-vm-config",
  "move-vm-profiler",
+ "move-vm-runtime-v3",
+ "move-vm-types-v3",
  "parking_lot 0.11.2",
  "petgraph",
  "proptest",
