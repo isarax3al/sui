@@ -16,9 +16,9 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use move_binary_format::file_format::{
-    AbilitySet, Bytecode, CodeUnit, Constant, DatatypeHandle, DatatypeHandleIndex, FieldDefinition,
-    FunctionDefinition, FunctionHandle, FunctionHandleIndex, IdentifierIndex, ModuleHandleIndex,
-    Signature, SignatureIndex, SignatureToken,
+    AbilitySet, Bytecode, CodeUnit, Constant, DatatypeHandle, DatatypeHandleIndex,
+    DatatypeTyParameter, FieldDefinition, FunctionDefinition, FunctionHandle, FunctionHandleIndex,
+    IdentifierIndex, ModuleHandleIndex, Signature, SignatureIndex, SignatureToken,
     SignatureToken::{Address, Bool},
     StructDefinition, StructFieldInformation, TypeSignature, Visibility, empty_module,
 };
@@ -284,4 +284,180 @@ fn fuzz_codeunit_verifier_no_panic() {
     eprintln!(
         "fuzz_codeunit_verifier_no_panic: {ITERATIONS} iterations, {reached} reached verifier, no panic"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Generics-aware harness.
+//
+// The `Mixed` skeleton above declares zero type parameters on both the struct
+// and the function handle. Any `SignatureToken::TypeParameter(n)` or
+// `DatatypeInstantiation` an arbitrary signature produces is therefore
+// out-of-bounds and rejected by the early bounds checker, so the *generic*
+// branches of the type-safety and reference-safety passes are never reached.
+//
+// `MixedGeneric` instead declares a fuzzer-chosen number of type parameters on
+// both the datatype and the function, so arbitrary generic tokens are in-bounds
+// and flow into the "paranoid" instantiation type checker and the borrow-graph
+// join over generic references -- the region where a verifier type-confusion
+// bypass (accepting an ill-typed generic module = memory-unsafe on-chain
+// execution) would live. A panic here is a real remote-crash candidate; an
+// accepted-but-ill-typed module is a far more serious soundness break.
+#[derive(Arbitrary, Debug)]
+struct MixedGeneric {
+    code: Vec<Bytecode>,
+    struct_abilities: AbilitySet,
+    // Constraints for each declared datatype type parameter (also fixes their count).
+    struct_ty_params: Vec<AbilitySet>,
+    struct_ty_params_phantom: Vec<bool>,
+    // Constraints for each declared function type parameter.
+    fun_ty_params: Vec<AbilitySet>,
+    param_types: Vec<SignatureToken>,
+    return_type: Option<SignatureToken>,
+    // Field type of the single struct field -- may itself reference a type parameter.
+    field_type: SignatureToken,
+    // Local variable types for the function body.
+    locals: Vec<SignatureToken>,
+}
+
+fn verify_mixed_generic(mix: MixedGeneric) {
+    let mut module = empty_module();
+    module.version = 5;
+
+    // Cap declared type-parameter counts so index space stays small enough that
+    // arbitrary TypeParameter(n) tokens frequently land in-bounds.
+    let struct_tps: Vec<DatatypeTyParameter> = mix
+        .struct_ty_params
+        .into_iter()
+        .take(4)
+        .enumerate()
+        .map(|(i, constraints)| DatatypeTyParameter {
+            constraints,
+            is_phantom: mix.struct_ty_params_phantom.get(i).copied().unwrap_or(false),
+        })
+        .collect();
+    let fun_tps: Vec<AbilitySet> = mix.fun_ty_params.into_iter().take(4).collect();
+
+    module.datatype_handles.push(DatatypeHandle {
+        module: ModuleHandleIndex(0),
+        name: IdentifierIndex(1),
+        abilities: mix.struct_abilities,
+        type_parameters: struct_tps,
+    });
+
+    module.function_handles.push(FunctionHandle {
+        module: ModuleHandleIndex(0),
+        name: IdentifierIndex(2),
+        parameters: SignatureIndex(0),
+        return_: SignatureIndex(1),
+        type_parameters: fun_tps,
+    });
+
+    module.signatures.pop();
+    module.signatures.push(Signature(mix.param_types)); // index 0: params
+    module.signatures.push(Signature(
+        mix.return_type.map(|s| vec![s]).unwrap_or_default(),
+    )); // index 1: return
+    module.signatures.push(Signature(mix.locals)); // index 2: locals
+
+    module.identifiers.extend(vec![
+        Identifier::from_str("zf_hello_world").unwrap(),
+        Identifier::from_str("awldFnU18mlDKQfh6qNfBGx8X").unwrap(),
+        Identifier::from_str("aQPwJNHyAHpvJ").unwrap(),
+        Identifier::from_str("aT7ZphKTrKcYCwCebJySrmrKlckmnL5").unwrap(),
+        Identifier::from_str("arYpsFa2fvrpPJ").unwrap(),
+    ]);
+    module.address_identifiers.push(AccountAddress::random());
+
+    module.constant_pool.push(Constant {
+        type_: Address,
+        data: AccountAddress::ZERO.into_bytes().to_vec(),
+    });
+
+    module.struct_defs.push(StructDefinition {
+        struct_handle: DatatypeHandleIndex(0),
+        field_information: StructFieldInformation::Declared(vec![FieldDefinition {
+            name: IdentifierIndex::new(3),
+            signature: TypeSignature(mix.field_type),
+        }]),
+    });
+
+    module.function_defs.push(FunctionDefinition {
+        code: Some(CodeUnit {
+            code: mix.code,
+            locals: SignatureIndex(2),
+            jump_tables: vec![],
+        }),
+        function: FunctionHandleIndex(0),
+        visibility: Visibility::Public,
+        is_entry: false,
+        acquires_global_resources: vec![],
+    });
+
+    let _ = crate::verifier::verify_module_unmetered(&module);
+}
+
+/// Long-running generics fuzz campaign. MUST be run with `--release` for the same
+/// reason as `fuzz_codeunit_verifier_no_panic` (debug-only asserts in the verifier
+/// panic by design and would produce benign-in-production false positives):
+/// `cargo test --release -p move-bytecode-verifier fuzz_generic_verifier_no_panic -- --ignored`.
+#[test]
+#[ignore = "long fuzz campaign; run with --release (debug-only asserts panic otherwise)"]
+fn fuzz_generic_verifier_no_panic() {
+    const ITERATIONS: usize = 5_000_000;
+    let mut rng = Rng(0x6E4E_1C5A_0F00_D00D);
+
+    let prev_hook = panic::take_hook();
+    panic::set_hook(Box::new(|_| {}));
+
+    let mut failure: Option<(usize, Vec<u8>)> = None;
+    let mut reached = 0usize;
+    for i in 0..ITERATIONS {
+        // Larger entropy budget: MixedGeneric has more fields to fill than Mixed.
+        let len = (rng.next_u64() % 1024) as usize;
+        let buf: Vec<u8> = (0..len).map(|_| rng.next_u64() as u8).collect();
+
+        let mut u = Unstructured::new(&buf);
+        let mix = match MixedGeneric::arbitrary(&mut u) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        reached += 1;
+
+        let res = panic::catch_unwind(AssertUnwindSafe(|| verify_mixed_generic(mix)));
+        if res.is_err() {
+            failure = Some((i, buf));
+            break;
+        }
+    }
+
+    panic::set_hook(prev_hook);
+
+    if let Some((i, buf)) = failure {
+        let hex: String = buf.iter().map(|b| format!("{:02x}", b)).collect();
+        panic!(
+            "GENERIC VERIFIER PANIC at iteration {i} (seed=0x6E4E_1C5A_0F00_D00D)\n\
+             entropy ({} bytes) = {hex}\n",
+            buf.len(),
+        );
+    }
+
+    eprintln!(
+        "fuzz_generic_verifier_no_panic: {ITERATIONS} iterations, {reached} reached verifier, no panic"
+    );
+}
+
+/// Reproduce a specific generic-harness failure from its hex entropy. Paste the
+/// hex printed by the campaign into `entropy` and run explicitly.
+#[test]
+#[ignore = "manual repro; paste failing entropy first"]
+fn repro_generic_panic_raw() {
+    let entropy = ""; // <- paste failing hex here
+    if entropy.is_empty() {
+        eprintln!("no entropy set; nothing to reproduce");
+        return;
+    }
+    let buf = decode_hex(entropy);
+    let mut u = Unstructured::new(&buf);
+    let mix = MixedGeneric::arbitrary(&mut u).expect("entropy rebuilds MixedGeneric");
+    verify_mixed_generic(mix);
 }
