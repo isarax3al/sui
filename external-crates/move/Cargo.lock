@@ -3035,6 +3035,7 @@ name = "move-vm-runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arbitrary",
  "bcs",
  "better_any",
  "bumpalo",

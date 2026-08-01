@@ -20,6 +20,8 @@ mod basic_block_tests;
 mod binary_format_version;
 mod compatibility_tests;
 mod exec_func_effects_tests;
+#[cfg(all(test, feature = "fuzzing"))]
+mod fuzz_execute_tests;
 mod function_arg_tests;
 mod instantiation_tests;
 mod interpreter_heap_tests;

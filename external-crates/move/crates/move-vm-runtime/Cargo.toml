@@ -42,7 +42,9 @@ move-vm-profiler.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
+arbitrary.workspace = true
 hex.workspace = true
+move-binary-format = { workspace = true, features = ["fuzzing"] }
 proptest.workspace = true
 move-ir-compiler.workspace = true
 move-ir-to-bytecode.workspace = true
