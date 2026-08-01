@@ -249,12 +249,42 @@ module 0x2e::Ops {
 }
 "#;
 
+/// Multi-module seed: `Caller::run` dispatches into another module `Lib` in the
+/// same package, so the sweep reshapes a caller whose control flow surrounds
+/// cross-module `Call`s -- exercising the vtable `resolve_function` path (and
+/// its interaction with offset renumbering) that single-module seeds do not.
+const SEED_SRC_MULTIMOD: &str = r#"
+module 0x2f::Lib {
+    public fun square(x: u64): u64 { x * x }
+    public fun add3(a: u64, b: u64, c: u64): u64 { a + b + c }
+}
+module 0x2f::Caller {
+    use 0x2f::Lib;
+    public fun run(): u64 {
+        let mut acc: u64 = 0;
+        let mut i: u64 = 0;
+        while (i < 5) {
+            if (i % 2 == 0) {
+                acc = acc + Lib::square(i)
+            } else {
+                acc = acc + Lib::add3(i, i, i)
+            };
+            i = i + 1;
+        };
+        // i=0:sq0=0, 1:add3(3)=3, 2:sq4=4, 3:add3(9)=9, 4:sq16=16 => 32
+        assert!(acc == 32, 1);
+        acc
+    }
+}
+"#;
+
 const SEEDS: &[(&str, &str)] = &[
     ("branches", SEED_SRC_BRANCHES),
     ("enum", SEED_SRC_ENUM),
     ("nested", SEED_SRC_NESTED),
     ("refs", SEED_SRC_REFS),
     ("ops", SEED_SRC_OPS),
+    ("multimod", SEED_SRC_MULTIMOD),
 ];
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -270,31 +300,38 @@ enum Outcome {
     ExecErr,
 }
 
-fn compile_seed(src: &str) -> CompiledModule {
-    let mut units = compile_units(src).expect("seed source compiles");
-    as_module(units.pop().unwrap())
+fn compile_seed(src: &str) -> Vec<CompiledModule> {
+    compile_units(src)
+        .expect("seed source compiles")
+        .into_iter()
+        .map(as_module)
+        .collect()
 }
 
-fn run_def_index(module: &CompiledModule) -> usize {
-    module
-        .function_defs
-        .iter()
-        .position(|fd| {
-            let fh = &module.function_handles[fd.function.0 as usize];
-            module.identifiers[fh.name.0 as usize].as_str() == "run"
-        })
-        .expect("seed has run()")
+/// Locate the `(module_index, function_def_index)` of the `run` function across
+/// a (possibly multi-module) seed package.
+fn locate_run(modules: &[CompiledModule]) -> (usize, usize) {
+    for (mi, m) in modules.iter().enumerate() {
+        if let Some(di) = m.function_defs.iter().position(|fd| {
+            let fh = &m.function_handles[fd.function.0 as usize];
+            m.identifiers[fh.name.0 as usize].as_str() == "run"
+        }) {
+            return (mi, di);
+        }
+    }
+    panic!("seed has no run()")
 }
 
-fn run_module(module: CompiledModule) -> Outcome {
-    let module_id = module.self_id();
+fn run_module(modules: Vec<CompiledModule>) -> Outcome {
+    let (mi, di) = locate_run(&modules);
+    let module_id = modules[mi].self_id();
     let run_name = {
-        let idx = run_def_index(&module);
-        let fh = &module.function_handles[module.function_defs[idx].function.0 as usize];
-        module.identifiers[fh.name.0 as usize].clone()
+        let m = &modules[mi];
+        let fh = &m.function_handles[m.function_defs[di].function.0 as usize];
+        m.identifiers[fh.name.0 as usize].clone()
     };
 
-    let Ok(pkg) = StoredPackage::from_modules_for_testing(TEST_ADDR, vec![module]) else {
+    let Ok(pkg) = StoredPackage::from_modules_for_testing(TEST_ADDR, modules) else {
         return Outcome::LoadRejected;
     };
     let mut adapter = InMemoryTestAdapter::new();
@@ -427,8 +464,8 @@ fn metamorphic_execute_equivalence() {
 
     for (seed_name, src) in SEEDS {
         let seed = compile_seed(src);
-        let run_idx = run_def_index(&seed);
-        let has_jt = !seed.function_defs[run_idx]
+        let (mi, run_idx) = locate_run(&seed);
+        let has_jt = !seed[mi].function_defs[run_idx]
             .code
             .as_ref()
             .unwrap()
@@ -442,7 +479,7 @@ fn metamorphic_execute_equivalence() {
             other => panic!("unmutated seed '{seed_name}' must execute Ok, got {other:?}"),
         };
 
-        let orig_len = seed.function_defs[run_idx]
+        let orig_len = seed[mi].function_defs[run_idx]
             .code
             .as_ref()
             .unwrap()
@@ -473,7 +510,7 @@ fn metamorphic_execute_equivalence() {
         // Transform 1: exhaustive single-Nop insertion at every offset.
         for p in 0..=orig_len {
             let mut m = seed.clone();
-            if !insert_nop(&mut m, run_idx, p) {
+            if !insert_nop(&mut m[mi], run_idx, p) {
                 continue;
             }
             let res = panic::catch_unwind(AssertUnwindSafe(|| run_module(m)));
@@ -488,12 +525,12 @@ fn metamorphic_execute_equivalence() {
             for a in 0..=orig_len {
                 for b in 0..=orig_len {
                     let mut m = seed.clone();
-                    if !insert_nop(&mut m, run_idx, a) {
+                    if !insert_nop(&mut m[mi], run_idx, a) {
                         continue;
                     }
                     // second insert shifts by the first; insert at b adjusted.
                     let b2 = if b >= a { b + 1 } else { b };
-                    if !insert_nop(&mut m, run_idx, b2) {
+                    if !insert_nop(&mut m[mi], run_idx, b2) {
                         continue;
                     }
                     let res = panic::catch_unwind(AssertUnwindSafe(|| run_module(m)));
@@ -506,7 +543,7 @@ fn metamorphic_execute_equivalence() {
         // basic block, exercising block-boundary detection + edge wiring).
         for p in 0..orig_len {
             let mut m = seed.clone();
-            if !insert_branch_to_next(&mut m, run_idx, p) {
+            if !insert_branch_to_next(&mut m[mi], run_idx, p) {
                 continue;
             }
             let res = panic::catch_unwind(AssertUnwindSafe(|| run_module(m)));
@@ -516,7 +553,7 @@ fn metamorphic_execute_equivalence() {
         // Transform 4: unused trailing locals (a range of counts).
         for n in [1usize, 2, 4, 8, 32, 200] {
             let mut m = seed.clone();
-            append_unused_locals(&mut m, run_idx, n);
+            append_unused_locals(&mut m[mi], run_idx, n);
             let res = panic::catch_unwind(AssertUnwindSafe(|| run_module(m)));
             classify(res, format!("[{seed_name}] +{n} unused locals"));
         }
