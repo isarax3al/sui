@@ -27,6 +27,8 @@ mod instantiation_tests;
 mod interpreter_heap_tests;
 mod jit_tests;
 mod jump_table_tests;
+#[cfg(all(test, feature = "fuzzing"))]
+mod metamorphic_vm_tests;
 mod leak_tests;
 mod loader_tests;
 mod nested_loop_tests;
