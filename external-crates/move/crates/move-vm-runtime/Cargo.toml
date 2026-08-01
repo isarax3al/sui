@@ -54,6 +54,10 @@ tempfile.workspace = true
 move-stdlib.workspace = true
 move-proc-macros.workspace = true
 insta.workspace = true
+# Old (v3) VM for cross-version differential testing (dev-only). No cycle: v3
+# does not depend on the new VM.
+move-vm-runtime-v3 = { path = "../../move-execution/v3/crates/move-vm-runtime" }
+move-vm-types-v3 = { path = "../../move-execution/v3/crates/move-vm-types" }
 
 [lints.clippy]
 indexing_slicing = "warn"

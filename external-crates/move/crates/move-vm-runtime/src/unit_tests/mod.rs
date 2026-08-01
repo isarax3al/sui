@@ -19,6 +19,8 @@ mod bad_storage_tests;
 mod basic_block_tests;
 mod binary_format_version;
 mod compatibility_tests;
+#[cfg(all(test, feature = "fuzzing"))]
+mod differential_vm_tests;
 mod exec_func_effects_tests;
 #[cfg(all(test, feature = "fuzzing"))]
 mod fuzz_execute_tests;
