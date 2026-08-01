@@ -68,7 +68,7 @@ module 0x2a::M {
 
     fun wrap<T>(t: T): G<T> { G { v: t } }
 
-    public fun run() {
+    public fun run(): u64 {
         let mut v: u64 = 0;
         let mut i: u64 = 0;
         while (i < 10) {
@@ -95,6 +95,10 @@ module 0x2a::M {
 
         let b = s.y && (v > 50);
         assert!(b, 4);
+
+        // Return a value derived from the whole computation so the differential
+        // check catches data divergence even if it would not trip an assert.
+        v + s.x + gv + (if (b) { 7 } else { 0 })
     }
 }
 "#;
@@ -106,7 +110,7 @@ const SEED_SRC_ENUM: &str = r#"
 module 0x2b::N {
     public enum E has drop { A, B(u64), C(u64, u64) }
 
-    public fun run() {
+    public fun run(): u64 {
         let mut total: u64 = 0;
         let mut i: u64 = 0;
         while (i < 6) {
@@ -121,6 +125,7 @@ module 0x2b::N {
         };
         // A:1, B(1):10, C(2,3):5, A:1, B(4):40, C(5,6):11 = 68
         assert!(total == 68, 1);
+        total
     }
 }
 "#;
@@ -129,7 +134,7 @@ module 0x2b::N {
 /// Maximizes the number of branch targets the Nop/Branch sweeps must renumber.
 const SEED_SRC_NESTED: &str = r#"
 module 0x2c::D {
-    public fun run() {
+    public fun run(): u64 {
         let mut acc: u64 = 0;
         let mut a: u64 = 0;
         while (a < 4) {
@@ -147,6 +152,7 @@ module 0x2c::D {
             a = a + 1;
         };
         assert!(acc == 21, 1);
+        acc
     }
 }
 "#;
@@ -158,7 +164,7 @@ module 0x2d::R {
 
     fun bump(r: &mut u64, d: u64) { *r = *r + d; }
 
-    public fun run() {
+    public fun run(): u64 {
         let mut p = P { a: 10, b: 20 };
         bump(&mut p.a, 5);
         assert!(p.a == 15, 1);
@@ -166,6 +172,7 @@ module 0x2d::R {
         bump(&mut p.b, x);
         assert!(p.b == 35, 2);
         assert!(*(&p.a) + *(&p.b) == 50, 3);
+        p.a + p.b
     }
 }
 "#;
@@ -177,13 +184,15 @@ const SEEDS: &[(&str, &str)] = &[
     ("refs", SEED_SRC_REFS),
 ];
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 enum Outcome {
     /// Verifier/loader refused the reshaped module (legitimate for some Nop
     /// placements, e.g. dead code after a terminator).
     LoadRejected,
-    /// Reached execution and returned normally.
-    ExecOk,
+    /// Reached execution and returned normally, carrying the concatenated BCS
+    /// bytes of the returned values (so two Ok outcomes can be compared for
+    /// value equality, not just success).
+    ExecOk(Vec<u8>),
     /// Reached execution and aborted/errored.
     ExecErr,
 }
@@ -232,7 +241,22 @@ fn run_module(module: CompiledModule) -> Outcome {
         &mut UnmeteredGasMeter,
         None,
     ) {
-        Ok(_) => Outcome::ExecOk,
+        Ok(vals) => {
+            let mut bytes = Vec::new();
+            for v in &vals {
+                match v.serialize() {
+                    Some(b) => {
+                        bytes.extend((b.len() as u32).to_le_bytes());
+                        bytes.extend(b);
+                    }
+                    // A returned value that cannot be serialized (e.g. a
+                    // reference) is not something these seeds produce; mark it
+                    // distinctly so it never silently compares equal.
+                    None => bytes.extend(b"<unserializable>"),
+                }
+            }
+            Outcome::ExecOk(bytes)
+        }
         Err(_) => Outcome::ExecErr,
     }
 }
@@ -338,13 +362,12 @@ fn metamorphic_execute_equivalence() {
             .jump_tables
             .is_empty();
 
-        // Baseline: the unmutated seed must execute cleanly. If not, the seed's
-        // expected constants are wrong -- fix the seed, not the VM.
-        assert_eq!(
-            run_module(seed.clone()),
-            Outcome::ExecOk,
-            "unmutated seed '{seed_name}' must execute Ok; adjust seed constants"
-        );
+        // Baseline: the unmutated seed must execute cleanly and return a value.
+        // If not, the seed itself is wrong -- fix the seed, not the VM.
+        let base_bytes = match run_module(seed.clone()) {
+            Outcome::ExecOk(b) => b,
+            other => panic!("unmutated seed '{seed_name}' must execute Ok, got {other:?}"),
+        };
 
         let orig_len = seed.function_defs[run_idx]
             .code
@@ -358,22 +381,30 @@ fn metamorphic_execute_equivalence() {
         );
         sweeps += 1;
 
+        // Classify one transformed run against the baseline. A reshaped module
+        // that LOADS must execute to the SAME return bytes; an abort, a panic,
+        // or a *different return value* is a JIT/execution miscompilation.
+        let mut classify = |res: std::thread::Result<Outcome>, label: String| match res {
+            Ok(Outcome::ExecOk(b)) => {
+                if b == base_bytes {
+                    ok += 1;
+                } else {
+                    findings.push(format!("{label} -> DIFFERENT RETURN VALUE"));
+                }
+            }
+            Ok(Outcome::LoadRejected) => rejected += 1,
+            Ok(Outcome::ExecErr) => findings.push(format!("{label} -> ExecErr")),
+            Err(_) => findings.push(format!("{label} -> PANIC")),
+        };
+
         // Transform 1: exhaustive single-Nop insertion at every offset.
         for p in 0..=orig_len {
             let mut m = seed.clone();
             if !insert_nop(&mut m, run_idx, p) {
                 continue;
             }
-            match panic::catch_unwind(AssertUnwindSafe(|| run_module(m))) {
-                Ok(Outcome::ExecOk) => ok += 1,
-                Ok(Outcome::LoadRejected) => rejected += 1,
-                Ok(Outcome::ExecErr) => {
-                    findings.push(format!("[{seed_name}] Nop@{p}: preserving insert -> ExecErr"));
-                }
-                Err(_) => {
-                    findings.push(format!("[{seed_name}] Nop@{p}: preserving insert -> PANIC"));
-                }
-            }
+            let res = panic::catch_unwind(AssertUnwindSafe(|| run_module(m)));
+            classify(res, format!("[{seed_name}] Nop@{p}"));
         }
 
         // Transform 2: two-Nop insertions at every pair of offsets (compounds
@@ -389,16 +420,8 @@ fn metamorphic_execute_equivalence() {
                 if !insert_nop(&mut m, run_idx, b2) {
                     continue;
                 }
-                match panic::catch_unwind(AssertUnwindSafe(|| run_module(m))) {
-                    Ok(Outcome::ExecOk) => ok += 1,
-                    Ok(Outcome::LoadRejected) => rejected += 1,
-                    Ok(Outcome::ExecErr) => {
-                        findings.push(format!("[{seed_name}] Nop@{a},{b2}: preserving -> ExecErr"));
-                    }
-                    Err(_) => {
-                        findings.push(format!("[{seed_name}] Nop@{a},{b2}: preserving -> PANIC"));
-                    }
-                }
+                let res = panic::catch_unwind(AssertUnwindSafe(|| run_module(m)));
+                classify(res, format!("[{seed_name}] Nop@{a},{b2}"));
             }
         }
 
@@ -409,32 +432,16 @@ fn metamorphic_execute_equivalence() {
             if !insert_branch_to_next(&mut m, run_idx, p) {
                 continue;
             }
-            match panic::catch_unwind(AssertUnwindSafe(|| run_module(m))) {
-                Ok(Outcome::ExecOk) => ok += 1,
-                Ok(Outcome::LoadRejected) => rejected += 1,
-                Ok(Outcome::ExecErr) => {
-                    findings.push(format!("[{seed_name}] Branch->next@{p}: preserving -> ExecErr"));
-                }
-                Err(_) => {
-                    findings.push(format!("[{seed_name}] Branch->next@{p}: preserving -> PANIC"));
-                }
-            }
+            let res = panic::catch_unwind(AssertUnwindSafe(|| run_module(m)));
+            classify(res, format!("[{seed_name}] Branch->next@{p}"));
         }
 
         // Transform 4: unused trailing locals (a range of counts).
         for n in [1usize, 2, 4, 8, 32, 200] {
             let mut m = seed.clone();
             append_unused_locals(&mut m, run_idx, n);
-            match panic::catch_unwind(AssertUnwindSafe(|| run_module(m))) {
-                Ok(Outcome::ExecOk) => ok += 1,
-                Ok(Outcome::LoadRejected) => rejected += 1,
-                Ok(Outcome::ExecErr) => {
-                    findings.push(format!("[{seed_name}] +{n} unused locals -> ExecErr"));
-                }
-                Err(_) => {
-                    findings.push(format!("[{seed_name}] +{n} unused locals -> PANIC"));
-                }
-            }
+            let res = panic::catch_unwind(AssertUnwindSafe(|| run_module(m)));
+            classify(res, format!("[{seed_name}] +{n} unused locals"));
         }
     }
 
