@@ -16,6 +16,56 @@ module bucket_v2_oracle::adversarial_outlier_tests {
     public struct HonestB has drop {}
     public struct Rogue has drop {}
 
+    public struct Primary has drop {}
+    public struct BackupA has drop {}
+    public struct BackupB has drop {}
+
+    /// REALISTIC scenario: a "primary + 2 backups" oracle. The primary holds the
+    /// majority weight (typical: it's the trusted feed, backups are sanity checks).
+    /// When the primary deviates (manipulation / lag / volatility), the mean-based
+    /// filter discards BOTH honest backups -- exactly when they are needed -- and
+    /// lets the primary's deviated price stand alone. Multi-source safety is nullified.
+    #[test]
+    fun test_majority_primary_deviation_discards_backups() {
+        let dev = @0xde1;
+        let mut scenario = ts::begin(dev);
+        let s = &mut scenario;
+        listing::init_for_testing(s.ctx());
+
+        s.next_tx(dev);
+        let mut cap = s.take_from_sender<ListingCap>();
+        aggregator::create<SUI>(&mut cap, 2, 1000 /* 10% tolerance */, s.ctx());
+        s.return_to_sender(cap);
+
+        // Primary weight 4 (67%), two backups weight 1 each.
+        s.next_tx(dev);
+        let cap = s.take_from_sender<ListingCap>();
+        let mut agg = s.take_shared<PriceAggregator<SUI>>();
+        agg.set_rule_weight<SUI, Primary>(&cap, 4);
+        agg.set_rule_weight<SUI, BackupA>(&cap, 1);
+        agg.set_rule_weight<SUI, BackupB>(&cap, 1);
+        s.return_to_sender(cap);
+        ts::return_shared(agg);
+
+        // Backups correctly report $1.00; the primary deviates to $1.30 (30% high).
+        s.next_tx(@0xcafe);
+        let agg = s.take_shared<PriceAggregator<SUI>>();
+        let mut c = collector::new<SUI>();
+        c.collect(Primary {}, option::some(float::from_bps(1_3000)));   // $1.30
+        c.collect(BackupA {}, option::some(float::from_bps(1_0000)));   // $1.00
+        c.collect(BackupB {}, option::some(float::from_bps(1_0000)));   // $1.00
+        let result = agg.aggregate(c).aggregated_price();
+        ts::return_shared(agg);
+
+        // mean = (1.30*4 + 1.00 + 1.00)/6 = 1.20
+        //   backups: |1.20-1.00|/1.20 = 0.167 > 0.10  -> BOTH BACKUPS REMOVED
+        //   primary: |1.20-1.30|/1.20 = 0.083 < 0.10  -> primary KEPT
+        //   result  = 1.30  (the primary's deviated price, backups discarded)
+        // A robust median filter would output $1.00 and flag the primary.
+        assert!(result.eq(float::from_bps(1_3000)), 9201);
+        scenario.end();
+    }
+
     #[test]
     fun test_outlier_filter_amplifies_anomaly() {
         let dev = @0xde1;
