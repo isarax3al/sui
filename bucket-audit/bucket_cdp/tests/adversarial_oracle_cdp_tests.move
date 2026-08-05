@@ -100,6 +100,19 @@ module bucket_v2_cdp::adversarial_oracle_cdp_tests {
         let true_price = result::new_for_testing<SUI>(float::from_bps(10000));
         assert!(!vault.position_is_healthy(attacker, &clock, &true_price), 9202);
 
+        // Quantify the loss explicitly (kills the "free assets / mint_for_testing" objection):
+        // the 1800 USDB the attacker minted are a REAL protocol liability. Measure how much of
+        // that liability is NOT backed by collateral at the true price.
+        //   coll_amount is 9-dec SUI; debt_amount is 6-dec USDB. At true price $1, converting the
+        //   collateral to USDB units divides by 10^(9-6) = 1000 -> 1e12/1000 = 1e9 = 1000 USDB.
+        let (coll_amount, debt_amount) = vault.get_position_data(attacker, &clock);
+        let coll_value_usdb = coll_amount / 1000;               // true USDB value of collateral
+        assert!(debt_amount > coll_value_usdb, 9203);           // debt exceeds true collateral value
+        let bad_debt = debt_amount - coll_value_usdb;           // unbacked USDB (protocol loss)
+        assert!(bad_debt >= cdp::usdb(700), 9204);              // >= 700 USDB of pure bad debt (~800)
+        // Even a full liquidation at the true price recovers only the ~1000 USDB of collateral,
+        // leaving `bad_debt` USDB minted with nothing behind it -> direct loss of funds.
+
         ts::return_shared(clock);
         ts::return_shared(vault);
         ts::return_shared(treasury);

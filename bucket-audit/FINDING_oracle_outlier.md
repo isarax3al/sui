@@ -47,7 +47,12 @@ and keeps the anomaly, amplifying rather than rejecting it. A robust design comp
    - Attacker deposits 1,000 SUI (true value $1,000 at price 1.0); MCR = 110%.
    - True max borrow ≈ 909 USDB. Using the **flawed aggregate (2.0)**, the attacker borrows **1,800 USDB** and it succeeds.
    - `position_is_healthy(attacker, true_price=1.0)` then returns **false** → the position is under-collateralized.
-   - Net: 1,800 USDB minted against ~$1,000 of collateral ⇒ ~$800 unbacked / bad debt.
+   - The PoC then reads the on-chain position via `get_position_data` and asserts the loss **explicitly**:
+     `debt_amount (1,800 USDB) − coll_value_at_true_price (1,000 USDB) = 800 USDB` of unbacked
+     bad debt (`assert bad_debt >= 700 USDB`). This is real minted USDB liability, not free/test assets —
+     the collateral was funded and the debt is a genuine protocol obligation; only the *price used to
+     size it* was wrong. A full liquidation at the true price recovers ~1,000 USDB and leaves ~800 USDB
+     minted with nothing behind it → direct loss of funds.
 
 Run:
 ```
