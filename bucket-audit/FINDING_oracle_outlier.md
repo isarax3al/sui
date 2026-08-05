@@ -37,11 +37,19 @@ the honest cluster falls *outside* tolerance. The filter therefore removes the h
 and keeps the anomaly, amplifying rather than rejecting it. A robust design compares to the
 **median** (as the comment intends), which is insensitive to a minority of extreme values.
 
-## Proof of Concept (runnable Move tests — both pass)
+## Proof of Concept (runnable Move tests — all pass)
 1. `bucket_oracle/tests/adversarial_outlier_tests.move :: test_outlier_filter_amplifies_anomaly`
    - Sources: HonestA=1.0 (w1), HonestB=1.0 (w1), Rogue=2.0 (w10); tolerance 10%.
    - `aggregate()` returns **2.0** (the rogue), not 1.0. The honest sources were removed.
    - Even worse than no filtering: the plain weighted mean would be 1.833; the filter pushed it to 2.0.
+
+1b. Boundary characterization (same file), proving the exact conditions above:
+   - `test_weight_boundary_around_half` — at δ=22%, sweeping the dominant weight 49% / 50% / 51%
+     yields result **1.00** (deviator correctly rejected) / **1.11** (tempered mean) / **1.22**
+     (honest rejected — the flip), pinning the boundary at exactly 50%.
+   - `test_deviation_below_window_yields_mean` (f=60%, δ=10%) → **1.06** (mean, no flip).
+   - `test_deviation_inside_window_full_flip` (f=60%, δ=25%) → **1.25** (deviated price alone).
+   - `test_deviation_above_window_aborts` (f=60%, δ=40%) → **abort** (liveness, not wrong price).
 
 2. `bucket_cdp/tests/adversarial_oracle_cdp_tests.move :: test_oracle_manipulation_enables_undercollateralized_borrow`
    - Attacker deposits 1,000 SUI (true value $1,000 at price 1.0); MCR = 110%.
@@ -60,17 +68,49 @@ sui move test adversarial_outlier      # in bucket_oracle
 sui move test adversarial_oracle_cdp   # in bucket_cdp
 ```
 
+## Exploitability window (derived from the code, empirically confirmed)
+Let the honest cluster price be `1.0`, a single source hold weight fraction `f` of the total,
+and report a deviated price `1 + δ`. The filter compares each price to the weighted mean
+`m = 1 + f·δ` and removes any source whose relative distance from `m` exceeds `tol`. Then:
+
+- Honest sources are removed iff `f·δ / (1 + f·δ) > tol`  ⇒ `δ > δ_min = tol / (f·(1 − tol))`
+- The deviating source is *kept* iff `(1 − f)·δ / (1 + f·δ) ≤ tol`  ⇒ `δ ≤ δ_max = tol / ((1 − f) − f·tol)`
+
+A non-empty "flip" window `(δ_min, δ_max]` exists **iff `f > 50%`** (only then is the deviating
+source closer to the mean than the honest cluster). Behavior by regime (proven in the boundary tests):
+
+| Regime | Outcome |
+|---|---|
+| `f ≤ 50%` | Deviating source is the farther one → correctly rejected (no flip at any δ). |
+| `f > 50%`, `δ ≤ δ_min` | All sources kept → result is the mildly skewed mean `1 + f·δ`. |
+| `f > 50%`, `δ_min < δ ≤ δ_max` | **Honest sources removed, deviated price stands alone → maximal price error.** |
+| `f > 50%`, `δ > δ_max` | Deviating source also removed → aggregation aborts (liveness, not wrong price). |
+
+Worked example (`f = 60%`, `tol = 10%`): the danger window is **18.52% < δ ≤ 29.41%**.
+
 ## Impact & severity (honest assessment)
 - The broken mechanism is a **safety-critical oracle defense** whose entire purpose is to
   neutralize an anomalous source price — exactly the threat the protocol acknowledges by having
   outlier detection. It fails and backfires.
-- **Precondition:** a *weighted* source must report an anomalous price. An external attacker
-  cannot forge a source witness, so this requires a source whose feed is manipulable, a
-  compromised source, or extreme volatility — AND that source must hold a large weight share
-  for the anomaly to *dominate* (with balanced weights, divergence instead causes the
-  aggregation to abort — a fail-safe/liveness issue rather than a wrong price).
-- Realistic rating: **Medium**, escalating to **High** if the deployed aggregator assigns a
-  dominant weight to any single source whose price feed is manipulable (verify on-chain weights).
+- **No external-attacker exploit exists from the code alone:** `result::new` is `public(package)`
+  and `aggregate()` requires holding every registered source witness, so a `PriceResult` cannot be
+  forged and unregistered sources are filtered. The wrong price therefore arises from a *legitimate*
+  dominant source deviating (manipulable/laggy feed or volatility), **not** from attacker input.
+- **But that does not make it low-impact:** once the aggregate is wrong, *any ordinary user* borrows
+  at the protocol's wrong price → under-collateralized debt / bad debt. No attacker control is needed
+  for the loss; there is also no TWAP or staleness guard (`PriceResult` carries no timestamp), so the
+  skewed price is consumed raw. This is a wrong-price-during-normal-operation issue, **not** a
+  front-run-only one.
+- **Honest rating:**
+  - **Medium — confirmed from the code + non-dominant configs** (logic differs from the documented
+    "median" design; runnable PoCs; conditional loss path).
+  - **High — technically proven, conditional on production config:** realized if a single price source
+    holds **> 50%** of the aggregator weight and its deviation lands in the derived window. The
+    "primary feed + lighter backups" topology (primary > 50%) is a common oracle design, so this is a
+    realistic configuration, not a contrived one.
+- **The decisive triage question:** *what are the actual production weights of the deployed
+  `PriceAggregator`s?* This is deployment state we cannot read from the source repo; the logic flaw
+  and its impact stand regardless.
 
 ## Recommended fix
 Compare each price to the **weighted median** (or an iterative/robust estimator), matching the
