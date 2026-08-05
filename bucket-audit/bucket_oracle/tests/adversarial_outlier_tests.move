@@ -217,4 +217,46 @@ module bucket_v2_oracle::adversarial_outlier_tests {
         // a liveness failure (price feed stalls), not a wrong price.
         let _r = run_two_source(60, 40, 14000, 10000, 1000);
     }
+
+    /// The complete-flip precondition (a single source with > 50% weight) is not
+    /// a contrived state that requires patching the contract: it is an officially
+    /// supported configuration. `set_rule_weight` accepts any u8 and enforces NO
+    /// per-source cap and NO "honest majority" invariant. This test builds the
+    /// canonical "primary 60% + two 20% backups" topology through the public API
+    /// and shows initialization + a normal aggregation both succeed.
+    #[test]
+    fun test_configuration_accepts_majority_weight_source() {
+        let dev = @0xde1;
+        let mut scenario = ts::begin(dev);
+        let s = &mut scenario;
+        listing::init_for_testing(s.ctx());
+
+        s.next_tx(dev);
+        let mut cap = s.take_from_sender<ListingCap>();
+        aggregator::create<SUI>(&mut cap, 2, 1000, s.ctx());
+        s.return_to_sender(cap);
+
+        // Primary 60%, BackupA 20%, BackupB 20% -- a single source owns a strict
+        // majority of the total weight. No abort, no validation rejects this.
+        s.next_tx(dev);
+        let cap = s.take_from_sender<ListingCap>();
+        let mut agg = s.take_shared<PriceAggregator<SUI>>();
+        agg.set_rule_weight<SUI, Primary>(&cap, 60);
+        agg.set_rule_weight<SUI, BackupA>(&cap, 20);
+        agg.set_rule_weight<SUI, BackupB>(&cap, 20);
+        s.return_to_sender(cap);
+        ts::return_shared(agg);
+
+        // And the config is fully operational: an all-honest round aggregates fine.
+        s.next_tx(@0xcafe);
+        let agg = s.take_shared<PriceAggregator<SUI>>();
+        let mut c = collector::new<SUI>();
+        c.collect(Primary {}, option::some(float::from_bps(10000)));
+        c.collect(BackupA {}, option::some(float::from_bps(10000)));
+        c.collect(BackupB {}, option::some(float::from_bps(10000)));
+        let r = agg.aggregate(c).aggregated_price();
+        assert!(r.eq(float::from_bps(10000)), 9131);
+        ts::return_shared(agg);
+        scenario.end();
+    }
 }
