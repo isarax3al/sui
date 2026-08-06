@@ -45,11 +45,26 @@ receipt → strict net loss. flash→CDP reduces to the same: flash USDB can onl
 repayment coin, and unwinding collateral to USDB routes through the par PSM.
 **Status: DISPROVED (runnable PoC).**
 
+## H-09: emergency security level has no max / no monotonicity (`vault.move` set_security_by_manager L325-339)
+`level` is a free `u8` with only `level == 0 || level < manager_level` rejected. A manager can set
+`security_level = 255`; since the only action levels are 1 and 2, `check_security_level` (L823-825)
+never aborts (`1>=255` and `2>=255` are false) → security is effectively OFF. A level-2 manager can
+also overwrite a stricter level-1 emergency freeze with 2/255, weakening a higher authority's action.
+**Real code defect (confirmed).** BUT the actor must hold a manager role, which is granted only by
+`AdminCap` (`set_manager_role`). Not reachable by an external/unauthorized attacker → **out of the
+Critical/High bounty definition** (authorized-insider / governance issue; defense-in-depth Low–Medium).
+Fix: restrict levels to {1,2} (or witnesses), forbid loosening a stricter existing level, gate
+emergency-release behind `AdminCap`.
+
 ## Closed / latent (do NOT submit)
-- **Oracle mean-vs-median** (`aggregator.move:265-280`): real logic defect, but ALL 27 mainnet
-  aggregators are single-source (threshold 1, one rule) → outlier filter is a no-op → not currently
-  exploitable. See `ONCHAIN_aggregator_weights.md`. Latent; reachable only if a ≥2-source aggregator
-  with a source ≥ threshold is ever configured. Low/Informational at most.
+- **Oracle mean-vs-median** (`aggregator.move:265-280`): real logic defect. NOW characterized more
+  sharply — a **sacrifice/bait source** lets an attacker coalition of ~10% weight defeat an honest
+  89% supermajority (`test_sacrifice_source_minority_controls_price`); the "single source > 50%"
+  bar was wrong. Precondition: attacker sets prices of ≥ 2 registered sources (bait + rider,
+  rider weight ≥ threshold). STILL not currently exploitable: ALL 27 mainnet aggregators are
+  single-source (threshold 1, one rule) → nothing to filter. See `ONCHAIN_aggregator_weights.md`.
+  Latent; reachable only if a ≥2-source aggregator is ever configured AND ≥2 of its sources are
+  attacker-influenceable. Do not submit as paid severity now.
 
 ## Verified sound this session (multi-lens, config-independent)
 mint witness gating (`public(package)`, empty structs — unforgeable) · limited_supply (overflow-safe) ·

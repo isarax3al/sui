@@ -24,6 +24,12 @@ module bucket_v2_oracle::adversarial_outlier_tests {
     public struct Dominant has drop {}
     public struct Backup has drop {}
 
+    // "Sacrifice source" attack witnesses: an honest whale, a surviving rider, and a
+    // heavy bait that is itself discarded but drags the mean first.
+    public struct Whale has drop {}
+    public struct Rider has drop {}
+    public struct Bait has drop {}
+
     /// Build a 2-source aggregator (one Dominant, one Backup), collect one price
     /// each, and return the aggregated price. Aborts (inside `aggregate`) if the
     /// filter removes every source (both outside tolerance of the skewed mean).
@@ -345,6 +351,61 @@ module bucket_v2_oracle::adversarial_outlier_tests {
         c.collect(BackupB {}, option::none());                        // inactive
         let _r = agg.aggregate(c).aggregated_price();  // survivor weight 40 < 50 -> abort
         ts::return_shared(agg);
+        scenario.end();
+    }
+
+    /// SACRIFICE-SOURCE attack: the earlier "> 50% weight" claim is NOT the real
+    /// bar. A heavy "bait" source that is itself discarded first drags the mean far
+    /// enough that the HONEST MAJORITY becomes the outlier, leaving a light rider to
+    /// set the price. Here honest holds 100/112 (89%!) of the weight yet is removed.
+    ///
+    ///   honest Whale  price 1.000  weight 100
+    ///   rider         price 0.818  weight 2      (attacker)
+    ///   bait          price 0.010  weight 10     (attacker, sacrificed)
+    ///   tolerance 10%, threshold 2
+    ///
+    ///   mean = (100*1.000 + 2*0.818 + 10*0.010)/112 = 0.908357
+    ///     Whale: |0.908357-1.000|/0.908357 = 10.089% > 10% -> REMOVED (majority honest!)
+    ///     rider: |0.908357-0.818|/0.908357 =  9.947% < 10% -> KEPT
+    ///     bait : |0.908357-0.010|/0.908357 = 98.9%   > 10% -> REMOVED
+    ///   survivor = rider (weight 2 >= threshold 2) -> final price 0.818 (18.2% error)
+    ///
+    /// Attacker coalition weight = 12/112 = 10.7%. This BREAKS the majority-weight
+    /// assumption and shows the filter fails even against an honest supermajority.
+    #[test]
+    fun test_sacrifice_source_minority_controls_price() {
+        let dev = @0xde1;
+        let mut scenario = ts::begin(dev);
+        let s = &mut scenario;
+        listing::init_for_testing(s.ctx());
+
+        s.next_tx(dev);
+        let mut cap = s.take_from_sender<ListingCap>();
+        aggregator::create<SUI>(&mut cap, 2, 1000, s.ctx()); // threshold 2, tolerance 10%
+        s.return_to_sender(cap);
+
+        s.next_tx(dev);
+        let cap = s.take_from_sender<ListingCap>();
+        let mut agg = s.take_shared<PriceAggregator<SUI>>();
+        agg.set_rule_weight<SUI, Whale>(&cap, 100);
+        agg.set_rule_weight<SUI, Rider>(&cap, 2);
+        agg.set_rule_weight<SUI, Bait>(&cap, 10);
+        s.return_to_sender(cap);
+        ts::return_shared(agg);
+
+        s.next_tx(@0xcafe);
+        let agg = s.take_shared<PriceAggregator<SUI>>();
+        let mut c = collector::new<SUI>();
+        c.collect(Whale {}, option::some(float::from_bps(10000)));  // honest 1.000, weight 100
+        c.collect(Rider {}, option::some(float::from_bps(8180)));   // 0.818, weight 2
+        c.collect(Bait {}, option::some(float::from_bps(100)));     // 0.010, weight 10 (sacrifice)
+        let result = agg.aggregate(c).aggregated_price();
+        ts::return_shared(agg);
+
+        // The honest 89%-weight source was filtered out; the light rider alone set the price.
+        assert!(result.eq(float::from_bps(8180)), 9150);
+        // And it is FAR from the honest consensus (1.000): an 18.2% error.
+        assert!(result.lt(float::from_bps(8500)), 9151);
         scenario.end();
     }
 }

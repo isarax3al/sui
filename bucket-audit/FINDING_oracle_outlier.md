@@ -76,6 +76,12 @@ and keeps the anomaly, amplifying rather than rejecting it. A robust design comp
    - `test_flip_below_threshold_aborts_not_wrong_price` — same `40/30/30`, but `weight_threshold=50`:
      `A` still filters out the honest source, but the lone survivor (40) is below 50 → **abort**.
      Proves the second necessary condition: the surviving deviating weight must meet the threshold.
+   - `test_sacrifice_source_minority_controls_price` — **the strongest variant: majority weight is NOT
+     required.** A heavy "bait" source (price 0.010, weight 10) that is itself discarded drags the mean
+     down enough that the **honest whale (price 1.000, weight 100 = 89%!)** becomes the outlier and is
+     removed, leaving a light "rider" (price 0.818, weight 2) to set the final price. Attacker coalition
+     weight = **12/112 = 10.7%**, yet it moves the aggregate **18.2%** and defeats an honest
+     supermajority. This refutes any "a single source needs >50%" defense.
 
 2. `bucket_cdp/tests/adversarial_oracle_cdp_tests.move :: test_oracle_manipulation_enables_undercollateralized_borrow`
    - Attacker deposits 1,000 SUI (true value $1,000 at price 1.0); MCR = 110%.
@@ -156,6 +162,18 @@ so the honest subset is filtered). Coalitions of several agreeing deviating sour
 (≈ 90.91% at `tol = 10%`). For `f ≥ 1/(1+tol)` the deviating source stays within tolerance of the
 mean for *any* deviation, so `δ_max = ∞` — there is no upper "abort" bound; arbitrarily large
 deviations are accepted.
+
+**The two-group `f > 50%` result is only a SPECIAL case — a coalition needs far less.** Because the
+reference is a *single* mean over *all* prices, an attacker controlling **two or more** registered
+sources can use one as a heavy "sacrifice/bait": priced extremely (e.g. 0.010) with modest weight, it
+drags the mean toward itself, is then itself discarded as an outlier, but not before it has pushed the
+mean far enough that the **honest majority** now sits outside tolerance while a second, lightly-weighted
+attacker "rider" sits just inside. Proven in `test_sacrifice_source_minority_controls_price`: honest
+weight 100 (89% of total) is filtered out and a weight-2 rider sets the price, with an attacker
+coalition of only **10.7%** of the weight. So the real precondition is not "one source > 50%" but
+"the attacker can set the prices of ≥ 2 registered sources (one bait + one rider), with the rider's
+weight ≥ `weight_threshold`." This makes the multi-source topology the protocol advertises for
+*resilience* actively harmful under the mean filter.
 
 ## Secondary guards (traced, not assumed)
 In the traced CDP health-check path — `update_position` → `position_is_healthy` → aggregated
