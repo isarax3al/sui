@@ -1,4 +1,4 @@
-# Oracle outlier-rejection is mean-based (not median) — anomalous source dominates the aggregate, enabling under-collateralized borrows
+# Weighted-mean outlier baseline lets a low-weight faulty-source coalition evict a higher-weight honest oracle source
 
 > ## ⚠️ On-chain verification (decisive — read first)
 > All **27** currently deployed Bucket V2 `PriceAggregator` objects on Sui mainnet were read live
@@ -15,29 +15,38 @@
 > The Move PoCs below prove the *mechanism*; they do not represent a live production state.
 
 ## Summary
-The README describes the oracle's Outlier Detection as *"Automatic filtering of abnormal prices"*
-(and the workflow step *"Filter outliers beyond tolerance"*). The implementation does the
-**opposite** under a realistic configuration: `bucket_oracle::aggregator::remove_outliers` compares
-every source price to the **weighted mean** of all prices, and because the mean is itself pulled
-toward an anomalous price, a source holding a **majority weight share (> 50%)** is **not** filtered —
-instead the honest minority is flagged as outliers and removed, and the abnormal price **dominates**
-the final aggregate. The safety mechanism amplifies the anomaly it was built to reject. (The code's
-own field comment at L73 says the tolerance is a *"deviation from the median price"*, confirming the
-intended statistic was the robust median, not the mean.)
+`bucket_oracle::aggregator::remove_outliers` computes its outlier reference as a **weighted mean over
+all submitted prices, including anomalous ones**. Because the mean is itself pulled by an anomalous
+price, a **faulty/compromised configured source** can act as a *sacrifice*: priced extremely, with
+modest weight, it drags the mean onto an attacker-controlled *target* price, is then itself discarded
+as an outlier, but not before the honest, **higher-weight** source has been pushed outside tolerance
+and removed. The lightly-weighted target survives (as long as its weight ≥ `weight_threshold`) and
+sets the final aggregate. The mechanism therefore **fails at its stated purpose** — the README lists
+Outlier Detection as *"Automatic filtering of abnormal prices"* / *"Filter outliers beyond
+tolerance"*, yet here it discards the honest price and keeps the abnormal one.
+
+Note on the description mismatch (stated precisely so triage cannot dismiss it): the README documents
+the mechanism as *"weighted average-based anomaly detection"*, so the defect is **not** "mean instead
+of the documented median". The defect is that a weighted-mean baseline is **non-robust** and inverts
+the filter's protective effect, and it also contradicts the module's own field comment
+(`aggregator.move:73`, *"deviation from the median price"*). The business-description violation is the
+**functional failure to filter an abnormal price**, not the choice of statistic name.
 
 Because the aggregated price feeds `bucket_cdp::vault::position_is_healthy` (collateral-ratio
-check) and `bucket_psm::pool::check_price`, an inflated aggregate lets a user borrow far more
-USDB than their collateral is truly worth → under-collateralized debt / bad debt → loss of
-funds for the protocol.
+check, `vault.move:677-679`) and `bucket_psm::pool::check_price`, a target price above the true value
+lets a borrower pass the health check on an under-collateralized position → bad debt / loss of funds.
 
 ## Scope
 - In scope: the defective file is in the audited repo (`bucket_oracle/sources/aggregator.move`),
-  not an imported contract. The defect is reproducible from source without touching access control
-  or corrupting the oracle object.
+  not an imported contract. Reproducible from source without touching access control.
+- **Who can trigger it (precise):** an external user **cannot** add a source or set a weight —
+  `set_rule_weight` is gated by `ListingCap`, and unregistered witnesses are filtered. The trigger is
+  therefore a **faulty / compromised / manipulable *configured* source** (e.g. a source module whose
+  feed can be moved on-market), or two such sources for the sacrifice variant — **not** an arbitrary
+  user forging prices.
 - Primary category: **"Attacks on logic (behavior of the code is different from the business
-  description)"** — README promises *"Automatic filtering of abnormal prices"*; the code retains the
-  abnormal price and discards the honest ones (a code comment even names the intended statistic as
-  *median*). Under a majority-weight source this escalates to **"loss of funds"**.
+  description)"** — the code fails to filter an abnormal price and instead discards the honest
+  higher-weight source. Escalates to **"loss of funds"** only under a multi-source configuration.
 - Not front-run-only, not a DoS report: the harm is a *wrong price accepted during normal operation*.
 
 ## Affected code

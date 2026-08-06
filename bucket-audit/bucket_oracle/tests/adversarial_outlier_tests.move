@@ -408,4 +408,49 @@ module bucket_v2_oracle::adversarial_outlier_tests {
         assert!(result.lt(float::from_bps(8500)), 9151);
         scenario.end();
     }
+
+    /// Same class, tuned so the SURVIVING price is a CDP-usable +25% inflation, with
+    /// the surviving rider weight exactly equal to weight_threshold (the tightest
+    /// legitimate config). Honest 89.3% weight is still evicted by an 10.7% coalition.
+    ///
+    ///   Whale 1.00 (w92), Rider 1.25 (w10), Bait 24.25 (w1); tol 10%, threshold 10
+    ///   mean = (92*1.00 + 10*1.25 + 1*24.25)/103 = 1.25
+    ///     Whale : |1.25-1.00|/1.25 = 20%   > 10% -> REMOVED
+    ///     Rider : 0%                        -> KEPT
+    ///     Bait  : |1.25-24.25|/1.25 = 1840% -> REMOVED
+    ///   survivor Rider weight 10 == threshold 10 -> final price 1.25 (feeds CDP over-borrow).
+    #[test]
+    fun test_sacrifice_source_survivor_at_target_price() {
+        let dev = @0xde1;
+        let mut scenario = ts::begin(dev);
+        let s = &mut scenario;
+        listing::init_for_testing(s.ctx());
+
+        s.next_tx(dev);
+        let mut cap = s.take_from_sender<ListingCap>();
+        aggregator::create<SUI>(&mut cap, 10, 1000, s.ctx()); // threshold 10, tolerance 10%
+        s.return_to_sender(cap);
+
+        s.next_tx(dev);
+        let cap = s.take_from_sender<ListingCap>();
+        let mut agg = s.take_shared<PriceAggregator<SUI>>();
+        agg.set_rule_weight<SUI, Whale>(&cap, 92);
+        agg.set_rule_weight<SUI, Rider>(&cap, 10);
+        agg.set_rule_weight<SUI, Bait>(&cap, 1);
+        s.return_to_sender(cap);
+        ts::return_shared(agg);
+
+        s.next_tx(@0xcafe);
+        let agg = s.take_shared<PriceAggregator<SUI>>();
+        let mut c = collector::new<SUI>();
+        c.collect(Whale {}, option::some(float::from_bps(10000)));   // honest 1.00, weight 92
+        c.collect(Rider {}, option::some(float::from_bps(12500)));   // 1.25, weight 10 (== threshold)
+        c.collect(Bait {}, option::some(float::from_bps(242500)));   // 24.25, weight 1 (sacrifice)
+        let result = agg.aggregate(c).aggregated_price();
+        ts::return_shared(agg);
+
+        // 89.3%-weight honest source evicted; final price is the attacker's +25% target.
+        assert!(result.eq(float::from_bps(12500)), 9160);
+        scenario.end();
+    }
 }
