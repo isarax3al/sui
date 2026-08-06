@@ -31,6 +31,20 @@ exceeded (excess → pending). No unbacked mint, no cap bypass.
 
 ---
 
+## H-08: cross-module composition (flash → PSM/CDP → repay) creates value
+**Hypothesis:** an atomic PTB combining a flash-mint with PSM/CDP ops extracts value that no
+single module allows.
+**Reasoning:** value conservation composes — each primitive is value-neutral (flash: hot-potato
+requires `mint+fee` back; PSM: par swap minus floors/ceil fees; CDP: minted == debt). A composition
+of value-neutral steps cannot create value; conversions are par-minus-fees, and there is no
+in-protocol mispricing to exploit (single-source Pyth, un-manipulable).
+**PoC:** `bucket_psm/tests/composite_flash_tests.move::test_flash_psm_roundtrip_no_arbitrage` —
+flash-mint B, `swap_out → swap_in` at ZERO PSM fees and 1:1 decimals, then repay: round-trip returns
+`r <= B` and `r < B + fee`, so the attacker must inject `shortfall = B+fee-r > 0` to close the
+receipt → strict net loss. flash→CDP reduces to the same: flash USDB can only repay debt / be a
+repayment coin, and unwinding collateral to USDB routes through the par PSM.
+**Status: DISPROVED (runnable PoC).**
+
 ## Closed / latent (do NOT submit)
 - **Oracle mean-vs-median** (`aggregator.move:265-280`): real logic defect, but ALL 27 mainnet
   aggregators are single-source (threshold 1, one rule) → outlier filter is a no-op → not currently

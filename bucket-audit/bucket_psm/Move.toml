@@ -30,6 +30,7 @@ bucket_v2_psm = "0x0"
 # The dev-dependencies section allows overriding dependencies for `--test` and
 # `--dev` modes. You can introduce test-only dependencies here.
 # Local = { local = "../path/to/dev-build" }
+BucketV2Flash = { local = "../bucket_flash" }
 
 [dev-addresses]
 # The dev-addresses section allows overwriting named addresses for the `--test`
