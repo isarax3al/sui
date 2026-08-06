@@ -259,4 +259,50 @@ module bucket_v2_oracle::adversarial_outlier_tests {
         ts::return_shared(agg);
         scenario.end();
     }
+
+    /// The `> 50%` precondition is over the ACTIVE (price-returning) sources, NOT
+    /// the total registered weight. `remove_outliers` drops sources that report
+    /// `none` (a stale/unavailable feed reports `option::none()` yet is still
+    /// "collected"), then computes the mean over the survivors. So a source whose
+    /// STATIC weight is a minority can become a majority of the active set whenever
+    /// enough other sources are inactive — and dominate the aggregate.
+    ///
+    /// Config: A=40, B=30, C=30 (no source exceeds 50% of the total 100). But if C
+    /// is inactive, A holds 40/(40+30) = 57.1% of the active weight and, deviating
+    /// 22%, filters out the honest B.
+    #[test]
+    fun test_inactive_source_lets_minority_weight_dominate() {
+        let dev = @0xde1;
+        let mut scenario = ts::begin(dev);
+        let s = &mut scenario;
+        listing::init_for_testing(s.ctx());
+
+        s.next_tx(dev);
+        let mut cap = s.take_from_sender<ListingCap>();
+        aggregator::create<SUI>(&mut cap, 2, 1000, s.ctx());
+        s.return_to_sender(cap);
+
+        s.next_tx(dev);
+        let cap = s.take_from_sender<ListingCap>();
+        let mut agg = s.take_shared<PriceAggregator<SUI>>();
+        agg.set_rule_weight<SUI, Primary>(&cap, 40);  // minority of the registered total
+        agg.set_rule_weight<SUI, BackupA>(&cap, 30);
+        agg.set_rule_weight<SUI, BackupB>(&cap, 30);
+        s.return_to_sender(cap);
+        ts::return_shared(agg);
+
+        s.next_tx(@0xcafe);
+        let agg = s.take_shared<PriceAggregator<SUI>>();
+        let mut c = collector::new<SUI>();
+        c.collect(Primary {}, option::some(float::from_bps(12200)));  // deviates +22%
+        c.collect(BackupA {}, option::some(float::from_bps(10000)));  // honest
+        c.collect(BackupB {}, option::none());                        // inactive feed
+        let r = agg.aggregate(c).aggregated_price();
+        ts::return_shared(agg);
+
+        // Active mean = (1.22*40 + 1.00*30)/70 = 1.1257; honest B is 11.2% away (removed),
+        // deviating A is 8.4% away (kept) -> aggregate resolves to the deviated 1.22.
+        assert!(r.eq(float::from_bps(12200)), 9140);
+        scenario.end();
+    }
 }

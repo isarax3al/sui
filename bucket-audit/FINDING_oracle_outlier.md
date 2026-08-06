@@ -56,6 +56,9 @@ and keeps the anomaly, amplifying rather than rejecting it. A robust design comp
    - `test_deviation_below_window_yields_mean` (f=60%, δ=10%) → **1.06** (mean, no flip).
    - `test_deviation_inside_window_full_flip` (f=60%, δ=25%) → **1.25** (deviated price alone).
    - `test_deviation_above_window_aborts` (f=60%, δ=40%) → **abort** (liveness, not wrong price).
+   - `test_inactive_source_lets_minority_weight_dominate` — weights **A=40/B=30/C=30** (no static
+     majority); with `C` inactive, the 40%-weight `A` is 57% of the *active* weight and its 22%
+     deviation discards the honest `B` → aggregate **1.22**. Proves the majority is over the ACTIVE set.
 
 2. `bucket_cdp/tests/adversarial_oracle_cdp_tests.move :: test_oracle_manipulation_enables_undercollateralized_borrow`
    - Attacker deposits 1,000 SUI (true value $1,000 at price 1.0); MCR = 110%.
@@ -111,6 +114,21 @@ source closer to the mean than the honest cluster). Behavior by regime (proven i
 
 Worked example (`f = 60%`, `tol = 10%`): the danger window is **18.52% < δ ≤ 29.41%**.
 
+**`f` is the ACTIVE-weight fraction, not the registered fraction.** `remove_outliers` first drops
+every source that reported `option::none()` (a stale/unavailable feed still gets "collected" but
+with a `none` price), then computes `total_weight` and the mean over the *survivors only*. So a
+source whose registered weight is a **minority** becomes an effective majority whenever enough other
+sources are inactive. Proven in `test_inactive_source_lets_minority_weight_dominate`: weights
+`A=40, B=30, C=30` (no source > 50% of the registered total) — but with `C` inactive, `A` holds
+`40/70 = 57.1%` of the active weight and, deviating 22%, filters out the honest `B`. **A static
+per-source weight ≤ 50% is therefore *not* sufficient to rule the flip out;** one must consider every
+active subset that still meets `weight_threshold`.
+
+**Unbounded-window edge:** `δ_max` is finite only while `(1 − f) − f·tol > 0`, i.e. `f < 1/(1+tol)`
+(≈ 90.91% at `tol = 10%`). For `f ≥ 1/(1+tol)` the deviating source stays within tolerance of the
+mean for *any* deviation, so `δ_max = ∞` — there is no upper "abort" bound; arbitrarily large
+deviations are accepted.
+
 ## Secondary guards (traced, not assumed)
 In the traced CDP health-check path — `update_position` → `position_is_healthy` → aggregated
 `PriceResult` — **no** post-aggregation validation neutralizes an accepted wrong price:
@@ -147,11 +165,15 @@ above the window give distorted-mean / full-flip / abort).
   timestamp and, in the traced path, no TWAP/freshness/rate-of-change validation. Depending on the
   deviation direction this permits **excess debt issuance** (shown: ≥ 100 USDB bad debt per 1,000
   SUI at a 25% deviation) or **incorrect liquidation**, and creates unrecoverable protocol bad debt.
-- **Medium — the provable floor** if all deployed configurations enforce that no single source
-  exceeds 50% of total weight: the defective aggregation and the availability (abort) failure remain,
-  but the complete-flip is unreachable.
-- **The decisive triage question:** *do any deployed `PriceAggregator`s assign a single source
-  > 50% of the total weight?* This is deployment state that cannot be read from the source repo.
+- **Medium — the provable floor** only if every deployed configuration guarantees that **no source
+  can ever hold a majority of the *active* weight** — i.e. for every source `A`, no subset of the
+  other sources reporting `none` can leave `A` above 50% while still meeting `weight_threshold`. This
+  is a much stronger condition than "no static weight > 50%" and the contract does not enforce it.
+- **The decisive triage question:** *for any deployed `PriceAggregator`, is there a viable active
+  subset (meeting `weight_threshold`) in which one source exceeds 50% of the active weight?* Answering
+  it needs the on-chain weights **and** `weight_threshold` — deployment state not in the source repo.
+  A single source with a static majority is the simplest sufficient case; inactive-feed combinations
+  are additional ones.
 
 ## Recommended fix
 Compare each price to the **weighted median** (or an iterative/robust estimator), matching the
