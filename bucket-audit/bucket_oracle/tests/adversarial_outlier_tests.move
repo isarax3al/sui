@@ -305,4 +305,46 @@ module bucket_v2_oracle::adversarial_outlier_tests {
         assert!(r.eq(float::from_bps(12200)), 9140);
         scenario.end();
     }
+
+    /// CRITICAL PRECONDITION: `weight_threshold` is checked AFTER outlier removal
+    /// (aggregate() L203-206), on the SURVIVORS. So an active-majority flip only
+    /// returns a wrong PRICE if the deviating source's OWN weight >= threshold;
+    /// otherwise, once the honest sources are filtered out, the lone survivor
+    /// fails the threshold and the call ABORTS (liveness, not a wrong price).
+    ///
+    /// Same 40/30/30 geometry as above, but threshold = 50: A becomes 57% of the
+    /// active weight and filters out honest B, yet the surviving weight (40) is
+    /// below 50 -> abort. This is why "active majority" alone is necessary but not
+    /// sufficient for a single-source complete flip.
+    #[test, expected_failure(abort_code = aggregator::ETotalWeightNotEnough)]
+    fun test_flip_below_threshold_aborts_not_wrong_price() {
+        let dev = @0xde1;
+        let mut scenario = ts::begin(dev);
+        let s = &mut scenario;
+        listing::init_for_testing(s.ctx());
+
+        s.next_tx(dev);
+        let mut cap = s.take_from_sender<ListingCap>();
+        aggregator::create<SUI>(&mut cap, 50, 1000, s.ctx());  // threshold = 50
+        s.return_to_sender(cap);
+
+        s.next_tx(dev);
+        let cap = s.take_from_sender<ListingCap>();
+        let mut agg = s.take_shared<PriceAggregator<SUI>>();
+        agg.set_rule_weight<SUI, Primary>(&cap, 40);
+        agg.set_rule_weight<SUI, BackupA>(&cap, 30);
+        agg.set_rule_weight<SUI, BackupB>(&cap, 30);
+        s.return_to_sender(cap);
+        ts::return_shared(agg);
+
+        s.next_tx(@0xcafe);
+        let agg = s.take_shared<PriceAggregator<SUI>>();
+        let mut c = collector::new<SUI>();
+        c.collect(Primary {}, option::some(float::from_bps(12200)));  // survives filter, weight 40
+        c.collect(BackupA {}, option::some(float::from_bps(10000)));  // filtered out
+        c.collect(BackupB {}, option::none());                        // inactive
+        let _r = agg.aggregate(c).aggregated_price();  // survivor weight 40 < 50 -> abort
+        ts::return_shared(agg);
+        scenario.end();
+    }
 }

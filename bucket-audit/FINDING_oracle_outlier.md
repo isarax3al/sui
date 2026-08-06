@@ -59,6 +59,9 @@ and keeps the anomaly, amplifying rather than rejecting it. A robust design comp
    - `test_inactive_source_lets_minority_weight_dominate` — weights **A=40/B=30/C=30** (no static
      majority); with `C` inactive, the 40%-weight `A` is 57% of the *active* weight and its 22%
      deviation discards the honest `B` → aggregate **1.22**. Proves the majority is over the ACTIVE set.
+   - `test_flip_below_threshold_aborts_not_wrong_price` — same `40/30/30`, but `weight_threshold=50`:
+     `A` still filters out the honest source, but the lone survivor (40) is below 50 → **abort**.
+     Proves the second necessary condition: the surviving deviating weight must meet the threshold.
 
 2. `bucket_cdp/tests/adversarial_oracle_cdp_tests.move :: test_oracle_manipulation_enables_undercollateralized_borrow`
    - Attacker deposits 1,000 SUI (true value $1,000 at price 1.0); MCR = 110%.
@@ -121,8 +124,19 @@ source whose registered weight is a **minority** becomes an effective majority w
 sources are inactive. Proven in `test_inactive_source_lets_minority_weight_dominate`: weights
 `A=40, B=30, C=30` (no source > 50% of the registered total) — but with `C` inactive, `A` holds
 `40/70 = 57.1%` of the active weight and, deviating 22%, filters out the honest `B`. **A static
-per-source weight ≤ 50% is therefore *not* sufficient to rule the flip out;** one must consider every
-active subset that still meets `weight_threshold`.
+per-source weight ≤ 50% is therefore *not* sufficient to rule the flip out.**
+
+**Second necessary condition — the survivor must meet `weight_threshold`.** The threshold is checked
+in `aggregate()` (L203-206) *after* `remove_outliers` runs, i.e. on the **survivors**. So a
+single-source complete flip returns an actual wrong price only if the deviating source's **own
+weight ≥ `weight_threshold`**. If the flip removes the honest sources and the lone survivor's weight
+is below the threshold, the call **aborts** (liveness) instead of returning the deviated price. Proven
+in `test_flip_below_threshold_aborts_not_wrong_price`: the same `40/30/30` geometry with
+`weight_threshold = 50` — `A` (40) filters out honest `B` but 40 < 50 → abort. So the single-source
+wrong-price condition is: **there exists a source `A` with `weight(A) ≥ weight_threshold` AND an
+honest active subset of combined weight `< weight(A)`** (which makes `A` a majority of the active set
+so the honest subset is filtered). Coalitions of several agreeing deviating sources, and partial
+(non-flip) distortion, are additional cases not covered by this single-source condition.
 
 **Unbounded-window edge:** `δ_max` is finite only while `(1 − f) − f·tol > 0`, i.e. `f < 1/(1+tol)`
 (≈ 90.91% at `tol = 10%`). For `f ≥ 1/(1+tol)` the deviating source stays within tolerance of the
