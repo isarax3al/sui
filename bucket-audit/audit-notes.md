@@ -56,6 +56,25 @@ Critical/High bounty definition** (authorized-insider / governance issue; defens
 Fix: restrict levels to {1,2} (or witnesses), forbid loosening a stricter existing level, gate
 emergency-release behind `AdminCap`.
 
+## Critical-path checklist (verified against the code — all closed or out-of-scope)
+The five preconditions for escalating the oracle finding to Critical, each checked:
+1. **Multi-source aggregator live on mainnet** — NO. All 27 are single-source (`ONCHAIN_aggregator_weights.md`).
+2. **A source permissionlessly manipulable** — UNASSESSABLE from scope: source adapters
+   (`pyth_rule`/`scoin_rule`/…) are not in the repo. With single-source, a manipulable source would
+   just pass its own value through (no filter amplification) — Pyth manipulation is out of scope anyway.
+3. **Untrusted oracle object accepted by CDP** — NO (CLOSED). CDP takes a `PriceResult<T>` *value*
+   (vault.move:349,556,668), not a `PriceAggregator`. `PriceResult` constructors are `result::new`
+   (`public(package)`) and `aggregate()`; the latter needs an aggregator (ListingCap-only) + registered
+   source witnesses. One aggregator per coin type (`listing::register` → `EAlreadyListed`). Attacker
+   cannot forge, self-create, register a 2nd, or inject a source.
+4. **`ListingCap` / admin capability leak** — NO. `listing::init` transfers the single cap to the
+   deployer at publish; no public mint. (Leakage would be an operational failure outside the code.)
+5. **Unlimited borrow/mint path** — NO. Mint == debt (H-01, PoC); borrow gated by CR check.
+
+⇒ **Critical is not reachable from in-scope code at the current deployment.** The oracle defect stays
+a latent multi-source fault-tolerance failure. Would require a future ≥2-source deployment AND ≥2
+attacker-influenceable sources AND a large exposed vault to become High/Critical.
+
 ## Closed / latent (do NOT submit)
 - **Oracle mean-vs-median** (`aggregator.move:265-280`): real logic defect. NOW characterized more
   sharply — a **sacrifice/bait source** lets an attacker coalition of ~10% weight defeat an honest
