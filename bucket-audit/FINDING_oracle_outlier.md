@@ -1,5 +1,19 @@
 # Oracle outlier-rejection is mean-based (not median) — anomalous source dominates the aggregate, enabling under-collateralized borrows
 
+> ## ⚠️ On-chain verification (decisive — read first)
+> All **27** currently deployed Bucket V2 `PriceAggregator` objects on Sui mainnet were read live
+> (via the SDK `AGGREGATOR_OBJS` config + gRPC `getObject`). **Every one is single-source**:
+> `weight_threshold = 1`, `outlier_tolerance = 1%`, exactly one rule (`PythRule` / `SCoinRule` /
+> `GCoinRule` / `BfBtcRule`) with weight `1`. With a single source there is nothing to filter —
+> `mean = median` = that source's price — so the outlier-filter defect **has no effect on the
+> current deployment**, and the complete-flip / bad-debt path is **not reachable** today.
+>
+> **Therefore this is a LATENT code defect, not a currently exploitable one.** It becomes reachable
+> only if Bucket ever configures an aggregator with ≥ 2 sources (which the code and README's
+> multi-source design explicitly invite). Realistic current severity: **Low / Informational**
+> (defense-in-depth). Do not submit as Medium+; the on-chain config does not support impact.
+> The Move PoCs below prove the *mechanism*; they do not represent a live production state.
+
 ## Summary
 The README describes the oracle's Outlier Detection as *"Automatic filtering of abnormal prices"*
 (and the workflow step *"Filter outliers beyond tolerance"*). The implementation does the
