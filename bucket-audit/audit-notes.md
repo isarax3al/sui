@@ -91,3 +91,37 @@ PSM par swap (fees ceil, floors) · flash mint/burn (hot-potato, exact repay) ·
 (matched credit/debt) · linked_table (standard, private field) · account identity (ACC-2 fix, owned) ·
 acl (package-gated) · interest accumulator (total_debt leads → no underflow; conservative) ·
 position_is_healthy decimals (truncate-down → conservative) · request/response locker (no reentrancy).
+
+---
+
+## AUDIT STATUS — attacker-profit-path sweep (in-scope packages exhausted)
+
+Goal for this pass: find a path where an ATTACKER extracts value (not a protocol-favoring
+rounding drift). Swept every money path in the in-scope zip:
+
+- **vault.update_position** (borrow/repay/withdraw): health check `icr = coll*price/debt >= MCR`
+  runs post-mutation via `get_position_data` (live debt incl. interest). `float.mul/div` round DOWN
+  ⇒ icr rounded down ⇒ check is *stricter* ⇒ protocol-safe. No under-collateralized borrow.
+- **vault.liquidate**: withdraw = ceil(repay*coll/debt), capped at coll; requires position unhealthy.
+  Liquidator profit bounded to (coll*price/debt − 1) < MCR−1 = 10%. Intended incentive. ceil bonus ≤1 unit.
+- **PSM swap_in/out**: both directions `floor()`; round-trip loses dust; `check_price` gates on
+  |price−1| ≤ tolerance. No arbitrage. `sheet` unused in swap path.
+- **float (1e9) / double (1e18)**: comprehensive overflow guards on add/mul/div/mul_u64/ceil/round;
+  from_fraction can't overflow u128/u256. No wrap.
+- **limited_supply.increase**: enforces cap (aborts > limit) — real, not cosmetic.
+- **account.AccountRequest**: mintable only for `ctx.sender()` or an owned `Account` (id-address);
+  impersonation bug already fixed (`// FIXED: ACC-2`). No forging another debtor.
+- **oracle aggregator/collector**: `collector.collect<T,R>` is public and takes an arbitrary
+  `price: Option<Float>`, BUT aggregate/remove_outliers only count rules present in `self.weights`
+  (configured). Injected rules (unknown witness type) get weight 0 and are removed before the
+  weighted-avg is computed ⇒ cannot shift the price. To feed a CONFIGURED rule you must hold that
+  rule's witness `R: drop`, constructed only by its adapter module.
+
+**Conclusion:** no attacker-profit High/Critical exists in the IN-SCOPE code. Only confirmed bug is
+the interest rounding drift → Low, protocol-favoring, no attacker gain (PoC: poc_interest_overmint.move).
+
+**Highest remaining lead = OUT OF SCOPE of the provided zip:** the oracle *rule adapter* modules
+(PythRule / SCoinRule / GCoinRule / BfBtcRule) that (a) construct the rule witness and (b) compute the
+`Float` price handed to `collector.collect`. A decimal/expo/confidence mis-scaling in ANY adapter =
+mispriced collateral = borrow unbacked USDB = Critical. These modules are NOT in bucket-audit/. Need
+their sources (Bucket GitHub oracle-adapter package) to continue the profit-path hunt.
