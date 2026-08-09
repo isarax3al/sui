@@ -125,3 +125,42 @@ the interest rounding drift → Low, protocol-favoring, no attacker gain (PoC: p
 `Float` price handed to `collector.collect`. A decimal/expo/confidence mis-scaling in ANY adapter =
 mispriced collateral = borrow unbacked USDB = Critical. These modules are NOT in bucket-audit/. Need
 their sources (Bucket GitHub oracle-adapter package) to continue the profit-path hunt.
+
+---
+
+## Novel-lens sweep: the "invisible files" (Treasury + custom linked_table)
+
+Methodology: audit the files researchers SKIP because they assume they're stdlib copies or
+plumbing. Two candidates carried real catastrophe potential; both verified closed.
+
+### usdb.move (Treasury — the single USDB mint authority for ALL modules)
+- `mint<M: drop>` / `burn<M: drop>`: gated by (a) caller must hold witness of type `M`
+  (package-private per module ⇒ unforgeable) AND (b) `assert_valid_module_version<M>` (M registered
+  + version whitelisted by AdminCap). Both mint & burn update `TreasuryCap.total_supply` AND
+  `module_config[M].limited_supply` by the same amount ⇒ invariant
+  `cap.total_supply == Σ_M module_supply` is preserved. Sound.
+- Safe defaults: `add_version` w/o `set_supply_limit` ⇒ limit 0 ⇒ mint aborts. `set_supply_limit`
+  w/o version ⇒ version check aborts. Can't mint without BOTH set by admin.
+- `collect<T,M>` / `claim<T,M>`: collect needs M-witness (donate under own module only); claim
+  gated by `beneficiary_address`. No cross-module theft. df keyed by `get<T>()` ⇒ type-safe.
+- **Liveness note (out of scope — DoS):** `collect_interest` caps interest to the VAULT's
+  increasable_amount, but `treasury.mint` independently checks the TREASURY CDP-module cap. If
+  admin sets treasury CDP cap < Σ vault caps, a full treasury cap makes `treasury.mint` abort inside
+  `accrue_interest` ⇒ update_position aborts ⇒ repay/withdraw/liquidate all brick until admin raises
+  the cap. Admin-config-dependent, not attacker-profit, DoS explicitly out of scope. Noted only.
+
+### linked_table.move (custom fork — holds the CDP position_table)
+- Fork of Sui stdlib + added positional `insert_front(next_k,…)` / `insert_back(prev_k,…)`.
+  Splice logic correct: aborts on duplicate key (df::add), aborts on missing anchor (prev/next
+  borrow), head/tail updated correctly. `remove` matches stdlib.
+- **Key finding: ordering is NOT financially load-bearing.** vault re-inserts each touched position
+  before its original successor (preserves insertion order, not CR-sorted). Liquidation targets a
+  caller-named debtor; there is no redemption-queue or "lowest-CR-first" consumer of the order. So
+  even a hypothetical ordering corruption yields zero fund impact. Closed.
+
+### Verdict of the whole in-scope sweep
+Mature, defensively-written codebase with visible prior audit fixes (ACC-2). No attacker-profit
+High/Critical in scope. Confirmed real bugs: interest rounding drift (Low, protocol-favoring) and
+liquidation ceil dust (Low, needs exotic low-decimal high-unit-value collateral that Sui assets
+don't provide). The only surface that could host a profit Critical — the oracle price *rule
+adapters* — is not in this repo.
