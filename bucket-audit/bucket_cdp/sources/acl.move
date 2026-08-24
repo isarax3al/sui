@@ -1,0 +1,41 @@
+/// Vault module for assigning managers for each security level
+module bucket_v2_cdp::acl {
+    use sui::vec_map::{Self, VecMap};
+
+    const EInvalidRole: u64 = 201;
+
+    fun err_invalid_role() { abort EInvalidRole }
+
+    public struct Acl has store {
+        // manager's security control access
+        managers: VecMap<address, u8>,
+    }
+
+    public(package) fun new(): Acl {
+        Acl { managers: vec_map::empty() }
+    }
+
+    public(package) fun set_role(self: &mut Acl, manager: address, level: u8) {
+        if(level == 0) err_invalid_role();
+
+        if (self.managers.contains(&manager)) {
+            *&mut self.managers[&manager] = level;
+        } else {
+            self.managers.insert(manager, level);
+        }
+    }
+
+    public(package) fun remove_role(self: &mut Acl, manager: address) {
+        if (self.managers.contains(&manager)) {
+            self.managers.remove(&manager);
+        }
+    }
+
+    public(package) fun exists_role(self: &Acl, manager: address): bool {
+        self.managers.contains(&manager)
+    }
+
+    public fun role_level(self: &Acl, manager: address): u8 {
+        self.managers[&manager]
+    }
+}

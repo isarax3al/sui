@@ -1,0 +1,23 @@
+# Bucket V2 oracle outlier PoC — test run log
+# commit: 6c7af461  branch: bucket-audit-src
+# sui: sui 1.69.0-b88f47814436
+# date: 2026-08-06T15:14:41Z
+
+== bucket_oracle: sui move test adversarial_outlier ==
+[ PASS    ] bucket_v2_oracle::adversarial_outlier_tests::test_configuration_accepts_majority_weight_source
+[ PASS    ] bucket_v2_oracle::adversarial_outlier_tests::test_deviation_above_window_aborts
+[ PASS    ] bucket_v2_oracle::adversarial_outlier_tests::test_deviation_below_window_yields_mean
+[ PASS    ] bucket_v2_oracle::adversarial_outlier_tests::test_deviation_inside_window_full_flip
+[ PASS    ] bucket_v2_oracle::adversarial_outlier_tests::test_flip_below_threshold_aborts_not_wrong_price
+[ PASS    ] bucket_v2_oracle::adversarial_outlier_tests::test_inactive_source_lets_minority_weight_dominate
+[ PASS    ] bucket_v2_oracle::adversarial_outlier_tests::test_majority_primary_deviation_discards_backups
+[ PASS    ] bucket_v2_oracle::adversarial_outlier_tests::test_outlier_filter_amplifies_anomaly
+[ PASS    ] bucket_v2_oracle::adversarial_outlier_tests::test_sacrifice_source_minority_controls_price
+[ PASS    ] bucket_v2_oracle::adversarial_outlier_tests::test_sacrifice_source_survivor_at_target_price
+[ PASS    ] bucket_v2_oracle::adversarial_outlier_tests::test_weight_boundary_around_half
+Test result: OK. Total tests: 11; passed: 11; failed: 0
+
+== bucket_cdp: sui move test adversarial_oracle_cdp ==
+[ PASS    ] bucket_v2_cdp::adversarial_oracle_cdp_tests::test_oracle_manipulation_enables_undercollateralized_borrow
+[ PASS    ] bucket_v2_cdp::adversarial_oracle_cdp_tests::test_realistic_majority_source_enables_bad_debt
+Test result: OK. Total tests: 2; passed: 2; failed: 0
